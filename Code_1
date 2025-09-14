@@ -3,17 +3,56 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import re
 from urllib.parse import urljoin
+import time
+
+def extract_breadcrumb_hierarchy(soup):
+    """
+    Extracts the breadcrumb navigation hierarchy from the page
+    """
+    hierarchy = {
+        'Industry': '',
+        'Driving_Category': '',
+        'Category': '',
+        'Sector': '',
+        'Sub_Category': ''
+    }
+    try:
+        # Find the breadcrumb navigation bar
+        breadcrumb_bar = soup.find('nav') or soup.find('div', attrs={'aria-label': 'breadcrumb'})
+        categories = []
+        if breadcrumb_bar:
+            breadcrumb_links = breadcrumb_bar.find_all('a')
+            categories = [item.get_text(strip=True) for item in breadcrumb_links]
+        # Remove navigation links
+        categories = [cat for cat in categories if cat.lower() not in ['industries', 'home', 'screens', 'login']]
+        # Only keep the last 5 items (the hierarchy)
+        if len(categories) > 5:
+            categories = categories[-5:]
+        # Map the categories to our hierarchy structure
+        if len(categories) >= 1:
+            hierarchy['Industry'] = categories[0]
+        if len(categories) >= 2:
+            hierarchy['Driving_Category'] = categories[1]
+        if len(categories) >= 3:
+            hierarchy['Category'] = categories[2]
+        if len(categories) >= 4:
+            hierarchy['Sector'] = categories[3]
+        if len(categories) >= 5:
+            hierarchy['Sub_Category'] = categories[4]
+    except Exception as e:
+        print(f"Error extracting hierarchy: {str(e)}")
+    return hierarchy
 
 def scrape_screener_industries():
     """
-    Scrapes all industry links from screener.in/market/ and saves to Excel
+    Scrapes all industry links and their hierarchical categorization from screener.in/market/
     """
     
     # Base URL
     base_url = "https://www.screener.in"
     market_url = "https://www.screener.in/market/"
     
-    # Headers to mimic a real browser (Yahoo-like user agent as requested)
+    # Headers to mimic a real browser
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -33,11 +72,7 @@ def scrape_screener_industries():
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # Find the table containing industry data
-        # The industries are in a table structure
         industry_data = []
-        
-        # Find all rows in the table
-        # Looking for links that contain "/market/" in their href
         industry_links = soup.find_all('a', href=re.compile(r'/market/'))
         
         print(f"Found {len(industry_links)} potential industry links...")
@@ -49,13 +84,13 @@ def scrape_screener_industries():
             href = link.get('href')
             industry_name = link.get_text(strip=True)
             
-            # Skip if it's a sorting/header link (contains query parameters)
+            # Skip if it's a sorting/header link
             if '?' in href:
                 continue
                 
-            # Skip if it's not an industry link (should have multiple path segments)
+            # Skip if it's not an industry link
             path_segments = href.strip('/').split('/')
-            if len(path_segments) < 4:  # market/XX/XXXX/XXXXXXXX/XXXXXXXXXX
+            if len(path_segments) < 4:
                 continue
                 
             # Skip empty or very short names
@@ -68,40 +103,81 @@ def scrape_screener_industries():
             # Avoid duplicates
             if industry_name not in seen_industries:
                 seen_industries.add(industry_name)
-                industry_data.append({
-                    'Industry_Name': industry_name,
-                    'Industry_Link': full_url
-                })
-                print(f"Added: {industry_name}")
+                
+                # Visit the industry page to extract hierarchy
+                try:
+                    print(f"Fetching details for: {industry_name}")
+                    industry_response = requests.get(full_url, headers=headers, timeout=30)
+                    industry_soup = BeautifulSoup(industry_response.content, 'html.parser')
+                    
+                    # Extract hierarchy information
+                    hierarchy = extract_breadcrumb_hierarchy(industry_soup)
+                    
+                    # Combine all information
+                    industry_info = {
+                        'Industry_Name': industry_name,
+                        'Industry_Link': full_url,
+                        **hierarchy  # Unpack hierarchy dictionary
+                    }
+                    
+                    industry_data.append(industry_info)
+                    print(f"Added: {industry_name}")
+                    
+                    # Be nice to the server
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    print(f"Error processing {industry_name}: {str(e)}")
+                    # Add basic information even if detailed scraping fails
+                    industry_data.append({
+                        'Industry_Name': industry_name,
+                        'Industry_Link': full_url,
+                        'Industry': '',
+                        'Driving_Category': '',
+                        'Category': '',
+                        'Sector': '',
+                        'Sub_Category': ''
+                    })
         
-        # Sort by industry name for better organization
+        # Sort by industry name
         industry_data.sort(key=lambda x: x['Industry_Name'])
         
         # Create DataFrame
         df = pd.DataFrame(industry_data)
         
-        # Add some additional columns that might be useful
+        # Add serial number and reorder columns
         df['Serial_No'] = range(1, len(df) + 1)
-        df = df[['Serial_No', 'Industry_Name', 'Industry_Link']]  # Reorder columns
+        columns = ['Serial_No', 'Industry_Name', 'Industry', 'Driving_Category', 
+                  'Category', 'Sector', 'Sub_Category', 'Industry_Link']
+        df = df[columns]
         
         # Save to Excel file
-        excel_filename = 'screener_industry_links.xlsx'
+        excel_filename = 'screener_industry_categorization.xlsx'
         with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Industry_Links', index=False)
+            df.to_excel(writer, sheet_name='Industry_Categories', index=False)
             
             # Get the workbook and worksheet objects
             workbook = writer.book
-            worksheet = writer.sheets['Industry_Links']
+            worksheet = writer.sheets['Industry_Categories']
             
-            # Adjust column widths for better readability
-            worksheet.column_dimensions['A'].width = 12  # Serial_No
-            worksheet.column_dimensions['B'].width = 50  # Industry_Name
-            worksheet.column_dimensions['C'].width = 80  # Industry_Link
+            # Adjust column widths
+            column_widths = {
+                'A': 12,  # Serial_No
+                'B': 40,  # Industry_Name
+                'C': 30,  # Industry
+                'D': 30,  # Driving_Category
+                'E': 30,  # Category
+                'F': 30,  # Sector
+                'G': 30,  # Sub_Category
+                'H': 80,  # Industry_Link
+            }
             
-            # Add some basic formatting
+            for col, width in column_widths.items():
+                worksheet.column_dimensions[col].width = width
+            
+            # Add formatting
             from openpyxl.styles import Font, PatternFill
             
-            # Header formatting
             header_font = Font(bold=True, color='FFFFFF')
             header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
             
@@ -109,19 +185,24 @@ def scrape_screener_industries():
                 cell.font = header_font
                 cell.fill = header_fill
         
-        print(f"\n✅ Successfully scraped {len(industry_data)} industries!")
+        print(f"\n✅ Successfully scraped {len(industry_data)} industries with categorization!")
         print(f"📊 Data saved to: {excel_filename}")
         print("\n📋 Summary:")
         print(f"   • Total industries found: {len(industry_data)}")
         print(f"   • Excel file: {excel_filename}")
-        print(f"   • Columns: Serial_No, Industry_Name, Industry_Link")
+        print(f"   • Columns: {', '.join(columns)}")
         
-        # Display first few entries as preview
-        print("\n🔍 Preview of first 5 industries:")
-        for i, item in enumerate(industry_data[:5]):
-            print(f"{i+1:2d}. {item['Industry_Name']}")
-            print(f"    Link: {item['Industry_Link']}")
-            print()
+        # Display preview
+        print("\n🔍 Preview of first 3 industries with categories:")
+        preview_df = df.head(3)
+        for _, row in preview_df.iterrows():
+            print(f"\n{int(row['Serial_No'])}. {row['Industry_Name']}")
+            print(f"   Industry: {row['Industry']}")
+            print(f"   Driving Category: {row['Driving_Category']}")
+            print(f"   Category: {row['Category']}")
+            print(f"   Sector: {row['Sector']}")
+            print(f"   Sub-Category: {row['Sub_Category']}")
+            print(f"   Link: {row['Industry_Link']}")
         
         return df
         
@@ -132,7 +213,6 @@ def scrape_screener_industries():
         print(f"❌ Error processing data: {e}")
         return None
 
-# Additional function to verify links
 def verify_sample_links(df, sample_size=5):
     """
     Verify a sample of scraped links to ensure they work
@@ -156,6 +236,7 @@ def verify_sample_links(df, sample_size=5):
         industry = df.iloc[idx]
         print(f"\n{i+1}. Testing: {industry['Industry_Name']}")
         print(f"   URL: {industry['Industry_Link']}")
+        print(f"   Categories: {industry['Industry']} > {industry['Driving_Category']} > {industry['Category']} > {industry['Sector']} > {industry['Sub_Category']}")
         
         try:
             response = requests.get(industry['Industry_Link'], headers=headers, timeout=10)
@@ -168,7 +249,7 @@ def verify_sample_links(df, sample_size=5):
 
 if __name__ == "__main__":
     # Run the scraper
-    print("🚀 Starting Screener.in Industry Links Scraper...")
+    print("🚀 Starting Screener.in Industry Categories Scraper...")
     print("=" * 60)
     
     # Scrape the data
