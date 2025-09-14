@@ -354,7 +354,7 @@ def test_single_industry_with_companies(base_url, headers):
 
 def scrape_all_industries_and_companies(excel_filename):
     """
-    Scrape all industries and their company data after validation
+    Scrape all industries and their company data
     """
     base_url = "https://www.screener.in"
     market_url = "https://www.screener.in/market/"
@@ -598,7 +598,7 @@ def validate_extraction_with_companies():
         test_result = test_single_industry_with_companies(base_url, headers)
         
         if not test_result:
-            return False
+            return False, None
         
         industry = test_result['industry']
         hierarchy = test_result['hierarchy']
@@ -639,11 +639,10 @@ def validate_extraction_with_companies():
         # Ask for validation
         print("\n" + "="*70)
         while True:
-            user_input = input("✅ Is this extraction (hierarchy + company data) CORRECT? (yes/no/quit): ").strip().lower()
+            user_input = input("✅ Is this extraction correct? (yes/no/quit): ").strip().lower()
             
             if user_input in ['yes', 'y']:
-                print("✅ Great! The extraction method is validated.")
-                return True, companies_data[0] if companies_data else None  # Return sample for column structure
+                return True, companies_data[0] if companies_data else None
             elif user_input in ['no', 'n']:
                 print("🔄 Let me try again with improved extraction...")
                 break  # Go back to the outer loop to try again
@@ -655,15 +654,9 @@ def validate_extraction_with_companies():
 
 def main():
     """
-    Main function to run the scraper with validation including company data
+    Main function to run the scraper with validation
     """
     print("🚀 Screener.in Industry & Company Data Scraper")
-    print("="*70)
-    print("This scraper will:")
-    print("1. Test breadcrumb + company data extraction on the first industry")
-    print("2. Show you the complete data structure")
-    print("3. Ask you to validate the extraction")
-    print("4. If correct, provide option to scrape all industries")
     print("="*70)
     
     # Step 1: Validate extraction method
@@ -673,34 +666,30 @@ def main():
         print("❌ Validation failed or cancelled. Exiting.")
         return
     
-    # Step 2: Show what the final data structure will look like
-    if sample_data:
-        print("\n📊 FINAL DATA STRUCTURE PREVIEW:")
-        print("="*50)
-        df_preview = pd.DataFrame([sample_data])
-        print("Columns that will be in the final Excel:")
-        for i, col in enumerate(df_preview.columns, 1):
-            print(f"{i:2}. {col}")
-        
-        print(f"\nSample row preview:")
-        for col, val in sample_data.items():
-            print(f"  {col}: {val}")
-    
-    print(f"\n✅ Validation completed successfully!")
-    print(f"💡 You can now modify the code to scrape all industries,")
-    print(f"   or use this structure to build your complete dataset.")
-    
-    # Ask if they want to proceed with full scraping
+    # Step 2: Get Excel filename and start extraction
     while True:
-        proceed = input("\n🚀 Do you want me to add the full scraping functionality? (yes/no): ").strip().lower()
-        if proceed in ['yes', 'y']:
-            print("Ready to implement full scraping functionality!")
-            break
-        elif proceed in ['no', 'n']:
-            print("👍 No problem! You can use this validation to understand the data structure.")
-            break
-        else:
-            print("Please enter 'yes' or 'no'")
+        excel_filename = input("\n📁 Enter the name for your Excel file (e.g., 'screener_data.xlsx'): ").strip()
+        
+        if not excel_filename:
+            print("Please enter a valid filename.")
+            continue
+            
+        # Add .xlsx extension if not provided
+        if not excel_filename.lower().endswith('.xlsx'):
+            excel_filename += '.xlsx'
+        
+        print(f"✅ Will save data to: {excel_filename}")
+        break
+    
+    # Step 3: Start full extraction
+    print(f"\n🚀 Starting full extraction...")
+    df = scrape_all_industries_and_companies(excel_filename)
+    
+    if df is not None:
+        print(f"\n🎉 EXTRACTION COMPLETED SUCCESSFULLY!")
+        print(f"📊 Data saved to: {excel_filename}")
+    else:
+        print(f"\n❌ Extraction failed.")
 
 if __name__ == "__main__":
     main()
