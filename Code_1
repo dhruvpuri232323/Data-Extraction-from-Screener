@@ -238,13 +238,13 @@ def extract_company_data(soup, industry_name, hierarchy, debug=False):
             cells = row.find_all(['td', 'th'])
             if len(cells) == 0:
                 continue
-                
-            # Skip header rows
+            
+            # Improved header row skipping logic
             cell_texts = [cell.get_text(strip=True) for cell in cells]
-            if not cell_texts or all(text in headers for text in cell_texts if text):
+            # Only skip if all cells match headers AND there are no numeric values (likely a header)
+            if cell_texts and all(text in headers for text in cell_texts if text) and not any(re.search(r'\d', text) for text in cell_texts):
                 continue
             
-            # Create row data
             row_data = {
                 'Industry_Name': industry_name,
                 'Industry': hierarchy['Industry'],
