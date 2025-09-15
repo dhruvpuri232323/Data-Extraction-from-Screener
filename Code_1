@@ -29,6 +29,116 @@ class ScreenerScraper:
         
         self.session.headers.update(self.headers)
     
+    def convert_to_number(self, value, debug=False):
+        """
+        Enhanced function to convert string values to appropriate numeric types
+        Handles Indian numbering format, percentages, negatives, and currency
+        """
+        if pd.isna(value) or value is None or value == '':
+            return None
+        
+        # Convert to string if not already
+        original_value = str(value).strip()
+        
+        # Return as-is if it's already a number
+        if isinstance(value, (int, float)):
+            return value
+        
+        # Skip conversion for obvious text fields
+        text_indicators = [
+            'ltd', 'limited', 'inc', 'corp', 'pvt', 'private', 'public',
+            'company', 'industries', 'group', 'holdings', 'ventures',
+            'technologies', 'services', 'solutions', 'systems', 'india',
+            'international', 'global', 'trading', 'exports', 'imports'
+        ]
+        
+        lower_value = original_value.lower()
+        if any(indicator in lower_value for indicator in text_indicators) and len(original_value) > 10:
+            return original_value
+        
+        # Clean the string for numeric conversion
+        cleaned_value = original_value
+        
+        # Handle special cases first
+        if cleaned_value.lower() in ['n/a', 'na', 'nil', 'null', '-', '--', '']:
+            return None
+        
+        # Remove currency symbols and common prefixes
+        cleaned_value = re.sub(r'^Rs\.?\s*', '', cleaned_value)
+        cleaned_value = re.sub(r'₹\s*', '', cleaned_value)
+        cleaned_value = re.sub(r'^\$\s*', '', cleaned_value)
+        
+        # Handle percentage
+        is_percentage = '%' in cleaned_value
+        cleaned_value = cleaned_value.replace('%', '')
+        
+        # Handle negative numbers (keep track of sign)
+        is_negative = False
+        if cleaned_value.startswith('(') and cleaned_value.endswith(')'):
+            is_negative = True
+            cleaned_value = cleaned_value[1:-1]
+        elif cleaned_value.startswith('-'):
+            is_negative = True
+            cleaned_value = cleaned_value[1:]
+        
+        # Remove commas and spaces
+        cleaned_value = cleaned_value.replace(',', '').replace(' ', '')
+        
+        # Handle Indian numbering suffixes (Cr, L, K, etc.)
+        multiplier = 1
+        suffix_multipliers = {
+            'cr': 10000000,      # 1 Crore = 10 Million
+            'crore': 10000000,
+            'l': 100000,         # 1 Lakh = 100 Thousand
+            'lakh': 100000,
+            'k': 1000,          # 1 Thousand
+            'thousand': 1000,
+            'm': 1000000,       # 1 Million
+            'million': 1000000,
+            'b': 1000000000,    # 1 Billion
+            'billion': 1000000000
+        }
+        
+        # Check for suffix
+        for suffix, mult in suffix_multipliers.items():
+            if cleaned_value.lower().endswith(suffix):
+                multiplier = mult
+                cleaned_value = cleaned_value[:-len(suffix)]
+                break
+        
+        # Remove any remaining non-numeric characters except decimal point
+        cleaned_value = re.sub(r'[^\d.]', '', cleaned_value)
+        
+        if not cleaned_value or cleaned_value == '.':
+            return original_value  # Return original if we can't clean it
+        
+        try:
+            # Convert to float
+            numeric_value = float(cleaned_value) * multiplier
+            
+            # Apply negative sign if needed
+            if is_negative:
+                numeric_value = -numeric_value
+            
+            # Handle percentage (convert to decimal)
+            if is_percentage:
+                numeric_value = numeric_value / 100
+            
+            # Convert to int if it's a whole number and not a percentage
+            if not is_percentage and numeric_value.is_integer() and abs(numeric_value) < 1e15:
+                numeric_value = int(numeric_value)
+            
+            if debug:
+                print(f"Converted '{original_value}' -> {numeric_value}")
+            
+            return numeric_value
+            
+        except (ValueError, TypeError):
+            # If conversion fails, return the original string
+            if debug:
+                print(f"Could not convert '{original_value}' to number, keeping as text")
+            return original_value
+    
     def login(self, email="Dhruvpuri1346@gmail.com", password="Naveen41118"):
         """
         Login to Screener.in with the provided credentials
@@ -264,7 +374,7 @@ class ScreenerScraper:
     
     def extract_company_data(self, soup, industry_name, hierarchy, debug=False):
         """
-        Enhanced company data extraction with login-aware features
+        Enhanced company data extraction with numeric conversion and login-aware features
         """
         companies_data = []
         
@@ -327,6 +437,14 @@ class ScreenerScraper:
                     print("No headers found")
                 return companies_data
             
+            # Identify numeric columns based on headers
+            numeric_column_indicators = [
+                'market cap', 'sales', 'profit', 'eps', 'pe', 'pb', 'div yield',
+                'roce', 'roe', 'debt', 'price', 'high', 'low', 'volume',
+                'cr', 'rs', '₹', '%', 'ratio', 'margin', 'growth', 'return',
+                'yield', 'turnover', 'revenue', 'income', 'expense'
+            ]
+            
             # Extract data rows
             tbody = table.find('tbody')
             if not tbody:
@@ -357,7 +475,7 @@ class ScreenerScraper:
                     'Sub_Category': hierarchy['Sub_Category']
                 }
                 
-                # Extract cell data
+                # Extract cell data with numeric conversion
                 for j, cell in enumerate(cells):
                     if j < len(headers):
                         header = headers[j]
@@ -373,7 +491,22 @@ class ScreenerScraper:
                                              .replace('(', '')
                                              .replace(')', ''))
                         
-                        row_data[clean_header] = cell_text
+                        # Determine if this column should be numeric
+                        header_lower = header.lower()
+                        is_likely_numeric = any(indicator in header_lower 
+                                              for indicator in numeric_column_indicators)
+                        
+                        # Convert to appropriate data type
+                        if is_likely_numeric and cell_text:
+                            converted_value = self.convert_to_number(cell_text, debug=debug and i <= 3)
+                            row_data[clean_header] = converted_value
+                        else:
+                            # For non-numeric columns, still try conversion but less aggressively
+                            if cell_text and re.match(r'^-?\d+\.?\d*\s*[%]?$', cell_text.replace(',', '')):
+                                converted_value = self.convert_to_number(cell_text, debug=debug and i <= 3)
+                                row_data[clean_header] = converted_value
+                            else:
+                                row_data[clean_header] = cell_text
                 
                 # Only add row if it has meaningful data (not just empty or header-like)
                 non_hierarchy_data = {k: v for k, v in row_data.items() 
@@ -583,13 +716,20 @@ class ScreenerScraper:
     
     def save_to_excel(self, companies_data, filename):
         """
-        Save data to Excel with proper formatting
+        Save data to Excel with proper formatting and data types
         """
         try:
             df = pd.DataFrame(companies_data)
             
             # Add global serial number
             df['Global_S_No'] = range(1, len(df) + 1)
+            
+            # Optimize data types for better Excel integration
+            for col in df.columns:
+                if col not in ['Global_S_No', 'Industry_Name', 'Industry', 
+                              'Driving_Category', 'Category', 'Sector', 'Sub_Category']:
+                    # Check if column has mixed types and clean up
+                    df[col] = df[col].apply(lambda x: x if pd.notna(x) else None)
             
             # Reorder columns
             identifier_columns = ['Global_S_No', 'Industry_Name', 'Industry', 
@@ -612,12 +752,41 @@ class ScreenerScraper:
                 summary_df = summary_df[['Summary_S_No'] + [col for col in summary_df.columns if col != 'Summary_S_No']]
                 summary_df.to_excel(writer, sheet_name='Industry_Summary', index=False)
                 
+                # Data types sheet for reference
+                dtypes_data = []
+                for col in df.columns:
+                    sample_values = df[col].dropna().head(5).tolist()
+                    dtypes_data.append({
+                        'Column_Name': col,
+                        'Data_Type': str(df[col].dtype),
+                        'Non_Null_Count': df[col].count(),
+                        'Sample_Values': str(sample_values)
+                    })
+                
+                dtypes_df = pd.DataFrame(dtypes_data)
+                dtypes_df.to_excel(writer, sheet_name='Data_Types_Info', index=False)
+                
                 # Format the sheets
                 self._format_excel_sheets(writer, df, summary_df)
             
             print(f"✅ SUCCESS! Data saved to {filename}")
             print(f"📊 Total companies: {len(df)}")
             print(f"📂 Industries: {len(summary_df)}")
+            
+            # Display data type summary
+            print(f"\n📋 DATA TYPES SUMMARY:")
+            numeric_cols = 0
+            text_cols = 0
+            for col in df.columns:
+                if col not in identifier_columns:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        numeric_cols += 1
+                    else:
+                        text_cols += 1
+            
+            print(f"   🔢 Numeric columns: {numeric_cols}")
+            print(f"   📝 Text columns: {text_cols}")
+            print(f"   📋 Total data columns: {len(df.columns) - len(identifier_columns)}")
             
             return df
             
@@ -630,8 +799,9 @@ class ScreenerScraper:
         Apply formatting to Excel sheets
         """
         try:
-            from openpyxl.styles import Font, PatternFill
+            from openpyxl.styles import Font, PatternFill, Alignment
             from openpyxl.utils import get_column_letter
+            from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1, FORMAT_PERCENTAGE_00
             
             # Format main sheet
             if 'All_Companies_Data' in writer.sheets:
@@ -644,6 +814,29 @@ class ScreenerScraper:
                 for cell in ws[1]:
                     cell.font = header_font
                     cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                
+                # Apply number formatting to numeric columns
+                for col_idx, col_name in enumerate(df.columns, 1):
+                    col_letter = get_column_letter(col_idx)
+                    
+                    if pd.api.types.is_numeric_dtype(df[col_name]):
+                        # Check if it's likely a percentage column
+                        if 'percent' in col_name.lower() or '%' in col_name:
+                            # Format as percentage
+                            for row in range(2, ws.max_row + 1):
+                                cell = ws[f'{col_letter}{row}']
+                                if cell.value is not None and isinstance(cell.value, (int, float)):
+                                    cell.number_format = FORMAT_PERCENTAGE_00
+                        else:
+                            # Format as number with commas for large numbers
+                            for row in range(2, ws.max_row + 1):
+                                cell = ws[f'{col_letter}{row}']
+                                if cell.value is not None and isinstance(cell.value, (int, float)):
+                                    if abs(cell.value) >= 1000:
+                                        cell.number_format = FORMAT_NUMBER_COMMA_SEPARATED1
+                                    else:
+                                        cell.number_format = '0.00'
                 
                 # Column widths
                 column_widths = {
@@ -654,7 +847,7 @@ class ScreenerScraper:
                     ws.column_dimensions[col_letter].width = width
                 
                 # Auto-width for other columns
-                for i in range(8, min(len(df.columns) + 1, 20)):
+                for i in range(8, min(len(df.columns) + 1, 30)):
                     ws.column_dimensions[get_column_letter(i)].width = 15
             
             # Format summary sheet
@@ -664,23 +857,38 @@ class ScreenerScraper:
                 for cell in ws[1]:
                     cell.font = header_font
                     cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
                 
                 summary_widths = {'A': 12, 'B': 35, 'C': 25, 'D': 35, 'E': 20, 'F': 20, 'G': 15}
                 for col_letter, width in summary_widths.items():
                     ws.column_dimensions[col_letter].width = width
+            
+            # Format data types sheet
+            if 'Data_Types_Info' in writer.sheets:
+                ws = writer.sheets['Data_Types_Info']
+                
+                for cell in ws[1]:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                
+                ws.column_dimensions['A'].width = 25  # Column_Name
+                ws.column_dimensions['B'].width = 15  # Data_Type
+                ws.column_dimensions['C'].width = 15  # Non_Null_Count
+                ws.column_dimensions['D'].width = 50  # Sample_Values
                     
         except Exception as e:
             print(f"⚠️ Warning: Could not apply Excel formatting: {str(e)}")
 
 def validate_extraction():
     """
-    Test and validate the extraction process
+    Test and validate the extraction process with enhanced numeric conversion
     """
     scraper = ScreenerScraper()
     
     while True:
         print("\n" + "="*70)
-        print("🧪 TESTING ENHANCED SCRAPER WITH LOGIN")
+        print("🧪 TESTING ENHANCED SCRAPER WITH NUMERIC CONVERSION")
         print("="*70)
         
         # Login first
@@ -688,6 +896,29 @@ def validate_extraction():
             print("❌ Login failed. Continue anyway? (y/n): ", end="")
             if input().strip().lower() != 'y':
                 return False
+        
+        # Test numeric conversion function first
+        print("\n🔢 TESTING NUMERIC CONVERSION:")
+        test_values = [
+            "1,23,456",           # Indian number format
+            "12.5Cr",             # Crores
+            "5.2L",               # Lakhs
+            "15.67%",             # Percentage
+            "(25.3)",             # Negative in parentheses
+            "-45.2",              # Regular negative
+            "Rs. 1,500",          # Currency
+            "₹2,50,000",          # Indian currency
+            "N/A",                # Not applicable
+            "Reliance Industries", # Company name (should stay text)
+            "123.45",             # Regular decimal
+            "0.0067%",            # Small percentage
+        ]
+        
+        for test_val in test_values:
+            converted = scraper.convert_to_number(test_val, debug=False)
+            print(f"   '{test_val}' -> {converted} ({type(converted).__name__})")
+        
+        print("\n" + "-"*50)
         
         # Test extraction
         test_result = scraper.test_single_industry(debug=True)
@@ -714,18 +945,44 @@ def validate_extraction():
             df_sample = pd.DataFrame(companies_data)
             print(f"   Columns found: {list(df_sample.columns)}")
             
+            # Show data types
+            print(f"\n🔢 DATA TYPES:")
+            identifier_cols = ['Industry_Name', 'Industry', 'Driving_Category', 
+                             'Category', 'Sector', 'Sub_Category']
+            
+            numeric_cols = []
+            text_cols = []
+            
+            for col in df_sample.columns:
+                if col not in identifier_cols:
+                    if pd.api.types.is_numeric_dtype(df_sample[col]):
+                        numeric_cols.append(col)
+                    else:
+                        text_cols.append(col)
+            
+            print(f"   🔢 Numeric columns ({len(numeric_cols)}): {numeric_cols[:5]}" + 
+                  (f"... and {len(numeric_cols)-5} more" if len(numeric_cols) > 5 else ""))
+            print(f"   📝 Text columns ({len(text_cols)}): {text_cols[:5]}" + 
+                  (f"... and {len(text_cols)-5} more" if len(text_cols) > 5 else ""))
+            
             print(f"\n🔍 SAMPLE COMPANIES (first 3):")
             for i, row in df_sample.head(3).iterrows():
                 print(f"\n   Company {i+1}:")
+                sample_data = {}
                 for col, val in row.items():
-                    if col not in ['Industry_Name', 'Industry', 'Driving_Category', 
-                                 'Category', 'Sector', 'Sub_Category']:
-                        print(f"     {col}: {val}")
+                    if col not in identifier_cols:
+                        sample_data[col] = val
+                        if len(sample_data) >= 5:  # Show first 5 non-identifier columns
+                            break
+                
+                for col, val in sample_data.items():
+                    val_type = type(val).__name__
+                    print(f"     {col}: {val} ({val_type})")
         
         # Validation
         print("\n" + "="*70)
         while True:
-            response = input("✅ Is this extraction correct? (yes/no/quit): ").strip().lower()
+            response = input("✅ Is this extraction correct with proper numeric conversion? (yes/no/quit): ").strip().lower()
             
             if response in ['yes', 'y']:
                 return True
@@ -739,9 +996,9 @@ def validate_extraction():
 
 def main():
     """
-    Main function to run the enhanced scraper
+    Main function to run the enhanced scraper with numeric conversion
     """
-    print("🚀 Enhanced Screener.in Scraper with Login Authentication")
+    print("🚀 Enhanced Screener.in Scraper with Numeric Data Conversion")
     print("="*70)
     
     # Validate extraction
@@ -766,21 +1023,37 @@ def main():
     # Start full scraping
     scraper = ScreenerScraper()
     
-    print(f"\n🚀 Starting full extraction...")
+    print(f"\n🚀 Starting full extraction with numeric conversion...")
     df = scraper.scrape_all_industries(filename)
     
     if df is not None:
         print(f"\n🎉 SCRAPING COMPLETED SUCCESSFULLY!")
         print(f"📊 Final dataset contains {len(df)} companies")
         
-        # Show sample data
-        print(f"\n🔍 Sample of extracted data:")
+        # Show sample data with types
+        print(f"\n🔍 Sample of extracted data with data types:")
+        identifier_cols = ['Global_S_No', 'Industry_Name', 'Industry', 'Driving_Category', 
+                          'Category', 'Sector', 'Sub_Category']
+        
         for idx, row in df.head(3).iterrows():
             company_name = next((row[col] for col in row.index 
                                if 'name' in col.lower() and row[col]), 'Unknown')
             print(f"\n{int(row['Global_S_No'])}. {company_name}")
             print(f"   Industry: {row['Industry_Name']}")
             print(f"   Hierarchy: {row['Driving_Category']} > {row['Category']} > {row['Sector']} > {row['Sub_Category']}")
+            
+            # Show some numeric data
+            sample_data = {}
+            for col, val in row.items():
+                if col not in identifier_cols and pd.notna(val):
+                    sample_data[col] = (val, type(val).__name__)
+                    if len(sample_data) >= 3:
+                        break
+            
+            for col, (val, val_type) in sample_data.items():
+                print(f"   {col}: {val} ({val_type})")
+        
+        print(f"\n📋 Data saved to {filename} with proper numeric formatting!")
     else:
         print(f"\n❌ Scraping failed.")
 
