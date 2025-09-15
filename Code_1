@@ -29,11 +29,89 @@ class ScreenerScraper:
         
         self.session.headers.update(self.headers)
     
+    def is_likely_company_name(self, value, debug=False):
+        """
+        Enhanced detection for company names and text that should remain as text
+        """
+        if pd.isna(value) or value is None or value == '':
+            return False
+        
+        value_str = str(value).strip()
+        
+        # If it's clearly a number already, it's not a company name
+        if isinstance(value, (int, float)):
+            return False
+        
+        # Very short values are unlikely to be company names
+        if len(value_str) <= 2:
+            return False
+        
+        # If it contains only numbers, percentages, currency symbols, it's numeric data
+        numeric_indicators = ['%', '₹', 'Rs', 'cr', 'Cr', 'L', 'lakh', 'K', 'M', 'B']
+        if any(indicator in value_str for indicator in numeric_indicators):
+            return False
+        
+        # If it's mostly numbers, it's probably numeric data
+        digit_count = sum(1 for char in value_str if char.isdigit())
+        if len(value_str) > 0 and digit_count / len(value_str) > 0.6:
+            return False
+        
+        # Check for obvious company name indicators
+        company_indicators = [
+            'ltd', 'limited', 'inc', 'corp', 'pvt', 'private', 'public',
+            'company', 'industries', 'group', 'holdings', 'ventures',
+            'technologies', 'services', 'solutions', 'systems',
+            'international', 'global', 'trading', 'exports', 'imports',
+            'enterprises', 'corporation', 'manufacturing', 'co.',
+            'pharmaceuticals', 'chemicals', 'steel', 'power', 'energy',
+            'communications', 'infrastructure', 'engineering', 'finance',
+            'textiles', 'motors', 'electronics', 'software', 'tech',
+            'bank', 'financial', 'insurance', 'capital', 'investment'
+        ]
+        
+        value_lower = value_str.lower()
+        has_company_indicator = any(indicator in value_lower for indicator in company_indicators)
+        
+        # If it has company indicators AND is reasonably long, it's likely a company name
+        if has_company_indicator and len(value_str) >= 8:
+            if debug:
+                print(f"'{value_str}' identified as company name (has indicators + good length)")
+            return True
+        
+        # If it's a long string with multiple words and no numbers, likely a company name
+        words = value_str.split()
+        if len(words) >= 2 and len(value_str) >= 10:
+            # Check if it's mostly alphabetic
+            alpha_chars = sum(1 for char in value_str if char.isalpha())
+            if alpha_chars / len(value_str) > 0.7:  # 70% alphabetic characters
+                if debug:
+                    print(f"'{value_str}' identified as company name (multi-word + mostly alphabetic)")
+                return True
+        
+        # Check for specific patterns that are clearly company names
+        # Pattern: "Word Word Ltd" or "Word Industries" etc.
+        if len(words) >= 2:
+            last_word = words[-1].lower()
+            if last_word in ['ltd', 'limited', 'inc', 'corp', 'pvt', 'co.', 'company']:
+                if debug:
+                    print(f"'{value_str}' identified as company name (ends with company suffix)")
+                return True
+        
+        # If it looks like a ticker symbol (short, all caps, mostly letters)
+        if len(value_str) <= 6 and value_str.isupper() and value_str.isalpha():
+            if debug:
+                print(f"'{value_str}' identified as ticker symbol (keeping as text)")
+            return True
+        
+        if debug:
+            print(f"'{value_str}' NOT identified as company name")
+        
+        return False
+    
     def convert_to_number(self, value, debug=False):
         """
         Enhanced function to convert string values to appropriate numeric types
-        Handles Indian numbering format, percentages, negatives, and currency
-        Only keeps text for obvious company names and category fields
+        Now properly preserves company names and text values
         """
         if pd.isna(value) or value is None or value == '':
             return None
@@ -45,27 +123,8 @@ class ScreenerScraper:
         if isinstance(value, (int, float)):
             return value
         
-        # Define patterns that should definitely stay as text (company names and categories)
-        text_only_indicators = [
-            'ltd', 'limited', 'inc', 'corp', 'pvt', 'private', 'public',
-            'company', 'industries', 'group', 'holdings', 'ventures',
-            'technologies', 'services', 'solutions', 'systems', 'india',
-            'international', 'global', 'trading', 'exports', 'imports',
-            'enterprises', 'corporation', 'manufacturing', 'textile',
-            'pharmaceuticals', 'chemicals', 'steel', 'power', 'energy',
-            'communications', 'infrastructure', 'engineering', 'finance'
-        ]
-        
-        lower_value = original_value.lower()
-        
-        # Only keep as text if it's clearly a company name (has common suffixes AND is long)
-        is_company_name = (
-            len(original_value) > 15 and  # Must be reasonably long
-            any(indicator in lower_value for indicator in text_only_indicators) and
-            not any(char in original_value for char in ['%', '₹', 'Rs', 'cr', 'Cr', 'L', 'lakh'])  # No numeric indicators
-        )
-        
-        if is_company_name:
+        # Check if this should remain as text (company names, etc.)
+        if self.is_likely_company_name(original_value, debug=debug):
             return original_value
         
         # Clean the string for numeric conversion
@@ -124,7 +183,11 @@ class ScreenerScraper:
         cleaned_value = re.sub(r'[^\d.]', '', cleaned_value)
         
         if not cleaned_value or cleaned_value == '.':
-            return 0.0  # Convert empty values to 0
+            # If after cleaning there's nothing numeric, check if original looked like text
+            if any(char.isalpha() for char in original_value):
+                return original_value  # Keep as text
+            else:
+                return 0.0  # Convert empty values to 0
         
         try:
             # Convert to float
@@ -133,9 +196,6 @@ class ScreenerScraper:
             # Apply negative sign if needed
             if is_negative:
                 numeric_value = -numeric_value
-            
-            # Handle percentage (keep as percentage, don't convert to decimal)
-            # This maintains the original percentage format for better readability
             
             # Convert to int if it's a whole number and not a percentage and not too large
             if not is_percentage and numeric_value.is_integer() and abs(numeric_value) < 1e15:
@@ -174,13 +234,19 @@ class ScreenerScraper:
             except:
                 pass
             
-            # Final fallback: if it looks like it should be a number but conversion failed
+            # Final fallback: if it contains any letters, keep as text
+            if any(char.isalpha() for char in original_value):
+                if debug:
+                    print(f"Keeping '{original_value}' as text (contains letters)")
+                return original_value
+            
+            # If it looks numeric but conversion failed, set to 0
             if any(char in original_value for char in '0123456789'):
                 if debug:
                     print(f"Could not convert '{original_value}' to number, setting to 0")
                 return 0.0
             
-            # Keep as text only if it's clearly text
+            # Keep as text for anything else
             if debug:
                 print(f"Keeping '{original_value}' as text")
             return original_value
@@ -418,9 +484,54 @@ class ScreenerScraper:
         
         return hierarchy
     
+    def identify_column_types(self, headers, sample_rows, debug=False):
+        """
+        Intelligently identify which columns should remain as text vs numeric
+        """
+        column_types = {}  # True = keep as text, False = convert to numeric
+        
+        for i, header in enumerate(headers):
+            header_lower = header.lower().strip()
+            
+            # Obvious text columns based on header names
+            text_keywords = [
+                'name', 'company', 'symbol', 'ticker', 'sector', 'industry',
+                'category', 'type', 'description', 'note', 'remark'
+            ]
+            
+            is_text_column = any(keyword in header_lower for keyword in text_keywords)
+            
+            if debug:
+                print(f"Header '{header}' - Text indicators: {is_text_column}")
+            
+            # If not obviously a text column, check sample data
+            if not is_text_column and sample_rows:
+                sample_values = []
+                for row in sample_rows[:5]:  # Check first 5 rows
+                    if i < len(row):
+                        cell_value = row[i].get_text(strip=True) if hasattr(row[i], 'get_text') else str(row[i])
+                        if cell_value:
+                            sample_values.append(cell_value)
+                
+                # Check if sample values look like company names
+                company_name_count = 0
+                for value in sample_values:
+                    if self.is_likely_company_name(value):
+                        company_name_count += 1
+                
+                # If more than 50% of samples look like company names, keep as text
+                if sample_values and company_name_count / len(sample_values) > 0.5:
+                    is_text_column = True
+                    if debug:
+                        print(f"Column {i} ('{header}') identified as text based on sample data")
+            
+            column_types[i] = is_text_column
+        
+        return column_types
+    
     def extract_company_data(self, soup, industry_name, hierarchy, debug=False):
         """
-        Enhanced company data extraction with aggressive numeric conversion
+        Enhanced company data extraction with intelligent text vs numeric detection
         """
         companies_data = []
         
@@ -483,16 +594,7 @@ class ScreenerScraper:
                     print("No headers found")
                 return companies_data
             
-            # Identify which columns should remain as text (only company names and similar)
-            text_only_columns = set()
-            for i, header in enumerate(headers):
-                header_lower = header.lower()
-                if any(keyword in header_lower for keyword in ['name', 'company', 'symbol', 'ticker']):
-                    text_only_columns.add(i)
-                    if debug:
-                        print(f"Column {i} ('{header}') marked as text-only")
-            
-            # Extract data rows
+            # Extract data rows for analysis
             tbody = table.find('tbody')
             if not tbody:
                 tbody = table
@@ -507,6 +609,17 @@ class ScreenerScraper:
                 if first_row_cells == headers:
                     start_index = 1
             
+            # Get sample rows for column type analysis
+            sample_rows = []
+            for row in rows[start_index:start_index+5]:  # First 5 data rows
+                cells = row.find_all(['td', 'th'])
+                if len(cells) > 0:
+                    sample_rows.append(cells)
+            
+            # Identify column types
+            column_types = self.identify_column_types(headers, sample_rows, debug=debug)
+            
+            # Extract data rows
             for i, row in enumerate(rows[start_index:], start=1):
                 cells = row.find_all(['td', 'th'])
                 if len(cells) == 0:
@@ -522,7 +635,7 @@ class ScreenerScraper:
                     'Sub_Category': hierarchy['Sub_Category']
                 }
                 
-                # Extract cell data with aggressive numeric conversion
+                # Extract cell data with intelligent type handling
                 for j, cell in enumerate(cells):
                     if j < len(headers):
                         header = headers[j]
@@ -538,12 +651,12 @@ class ScreenerScraper:
                                              .replace('(', '')
                                              .replace(')', ''))
                         
-                        # Convert to appropriate data type
-                        if j in text_only_columns:
-                            # Keep as text for company names/symbols
-                            row_data[clean_header] = cell_text
-                        else:
-                            # Try to convert everything else to numbers
+                        # Use intelligent type detection
+                        if column_types.get(j, False):  # Keep as text
+                            row_data[clean_header] = cell_text if cell_text else ""
+                            if debug and i <= 3:
+                                print(f"Keeping '{cell_text}' as text for column '{header}'")
+                        else:  # Try to convert to numeric
                             converted_value = self.convert_to_number(cell_text, debug=debug and i <= 3)
                             row_data[clean_header] = converted_value
                 
@@ -552,7 +665,7 @@ class ScreenerScraper:
                                      if k not in ['Industry_Name', 'Industry', 'Driving_Category', 
                                                  'Category', 'Sector', 'Sub_Category']}
                 
-                if any(v for v in non_hierarchy_data.values()):
+                if any(v for v in non_hierarchy_data.values() if v != "" and v is not None):
                     companies_data.append(row_data)
                     
                     if debug and i <= 3:
@@ -763,28 +876,39 @@ class ScreenerScraper:
             # Add global serial number
             df['Global_S_No'] = range(1, len(df) + 1)
             
-            # Force numeric conversion for all non-text columns
+            # Intelligent data type handling - preserve text where appropriate
             identifier_columns = ['Global_S_No', 'Industry_Name', 'Industry', 
                                 'Driving_Category', 'Category', 'Sector', 'Sub_Category']
             
-            # Convert all remaining columns to proper numeric types
+            # Analyze and convert columns appropriately
             for col in df.columns:
-                if col not in identifier_columns:
-                    # Check if column has string values that look like company names
+                if col not in identifier_columns and col in df.columns:
+                    # Check sample values to determine if this should be text or numeric
                     sample_values = df[col].dropna().head(10)
                     
-                    # If most values are clearly company names, keep as text
-                    if len(sample_values) > 0:
-                        text_count = sum(1 for val in sample_values 
-                                       if isinstance(val, str) and len(str(val)) > 10 and 
-                                       any(word in str(val).lower() for word in ['ltd', 'limited', 'inc', 'corp', 'pvt']))
-                        
-                        # If more than 50% look like company names, keep as text
-                        if text_count / len(sample_values) > 0.5:
-                            continue
+                    if len(sample_values) == 0:
+                        continue
                     
-                    # Otherwise, ensure all values are numeric
-                    df[col] = df[col].apply(lambda x: self.convert_to_number(x) if pd.notna(x) else 0.0)
+                    # Count how many look like company names vs numbers
+                    company_name_count = 0
+                    numeric_looking_count = 0
+                    
+                    for val in sample_values:
+                        if self.is_likely_company_name(val):
+                            company_name_count += 1
+                        elif isinstance(val, (int, float)) or (isinstance(val, str) and 
+                                                              any(char.isdigit() for char in str(val))):
+                            numeric_looking_count += 1
+                    
+                    # If more than 70% look like company names, keep as text
+                    if company_name_count / len(sample_values) > 0.7:
+                        # Keep as text - don't convert
+                        print(f"   📝 Keeping column '{col}' as text (company names detected)")
+                        continue
+                    else:
+                        # Try to convert to numeric, but preserve text values that should stay as text
+                        print(f"   🔢 Converting column '{col}' to numeric (where appropriate)")
+                        df[col] = df[col].apply(lambda x: self.convert_to_number(x) if pd.notna(x) else None)
             
             # Reorder columns
             other_columns = [col for col in df.columns if col not in identifier_columns]
@@ -805,63 +929,57 @@ class ScreenerScraper:
                 summary_df = summary_df[['Summary_S_No'] + [col for col in summary_df.columns if col != 'Summary_S_No']]
                 summary_df.to_excel(writer, sheet_name='Industry_Summary', index=False)
                 
-                # Data types sheet for reference
-                dtypes_data = []
+                # Company Names Analysis sheet
+                company_name_analysis = []
                 for col in df.columns:
-                    sample_values = df[col].dropna().head(5).tolist()
-                    numeric_count = sum(1 for val in df[col].dropna() if isinstance(val, (int, float)))
-                    text_count = sum(1 for val in df[col].dropna() if isinstance(val, str))
-                    
-                    dtypes_data.append({
-                        'Column_Name': col,
-                        'Data_Type': str(df[col].dtype),
-                        'Non_Null_Count': df[col].count(),
-                        'Numeric_Values': numeric_count,
-                        'Text_Values': text_count,
-                        'Sample_Values': str(sample_values)
-                    })
+                    if col not in identifier_columns:
+                        sample_vals = df[col].dropna().head(10)
+                        text_vals = [v for v in sample_vals if isinstance(v, str)]
+                        numeric_vals = [v for v in sample_vals if isinstance(v, (int, float))]
+                        
+                        company_name_analysis.append({
+                            'Column_Name': col,
+                            'Total_Non_Null': df[col].count(),
+                            'Text_Values': len(text_vals),
+                            'Numeric_Values': len(numeric_vals),
+                            'Text_Percentage': round((len(text_vals) / len(sample_vals) * 100), 1) if sample_vals else 0,
+                            'Sample_Text_Values': str(text_vals[:3]) if text_vals else '',
+                            'Sample_Numeric_Values': str(numeric_vals[:3]) if numeric_vals else ''
+                        })
                 
-                dtypes_df = pd.DataFrame(dtypes_data)
-                dtypes_df.to_excel(writer, sheet_name='Data_Types_Info', index=False)
+                analysis_df = pd.DataFrame(company_name_analysis)
+                analysis_df.to_excel(writer, sheet_name='Data_Analysis', index=False)
                 
                 # Format the sheets
-                self._format_excel_sheets(writer, df, summary_df)
+                self._format_excel_sheets(writer, df, summary_df, analysis_df)
             
             print(f"✅ SUCCESS! Data saved to {filename}")
             print(f"📊 Total companies: {len(df)}")
             print(f"📂 Industries: {len(summary_df)}")
             
-            # Display data type summary
-            print(f"\n📋 DATA TYPES SUMMARY:")
-            numeric_cols = 0
-            text_cols = 0
-            for col in df.columns:
-                if col not in identifier_columns:
-                    if pd.api.types.is_numeric_dtype(df[col]):
-                        numeric_cols += 1
-                    else:
-                        text_cols += 1
+            # Display detailed analysis
+            print(f"\n📋 COLUMN ANALYSIS:")
+            for _, row in analysis_df.iterrows():
+                col_name = row['Column_Name']
+                text_pct = row['Text_Percentage']
+                text_count = row['Text_Values']
+                numeric_count = row['Numeric_Values']
+                
+                if text_pct > 70:
+                    print(f"   📝 {col_name}: {text_pct}% text ({text_count} text, {numeric_count} numeric) - TEXT COLUMN")
+                elif text_pct > 30:
+                    print(f"   ⚠️ {col_name}: {text_pct}% text ({text_count} text, {numeric_count} numeric) - MIXED COLUMN")
+                else:
+                    print(f"   🔢 {col_name}: {text_pct}% text ({text_count} text, {numeric_count} numeric) - NUMERIC COLUMN")
             
-            print(f"   🔢 Numeric columns: {numeric_cols}")
-            print(f"   📝 Text columns: {text_cols}")
-            print(f"   📋 Total data columns: {len(df.columns) - len(identifier_columns)}")
-            
-            # Show conversion summary
-            print(f"\n🔄 CONVERSION SUMMARY:")
-            for col in df.columns:
-                if col not in identifier_columns:
-                    non_null_values = df[col].dropna()
-                    if len(non_null_values) > 0:
-                        numeric_count = sum(1 for val in non_null_values if isinstance(val, (int, float)))
-                        text_count = sum(1 for val in non_null_values if isinstance(val, str))
-                        conversion_rate = (numeric_count / len(non_null_values)) * 100
-                        
-                        if conversion_rate > 90:
-                            print(f"   ✅ {col}: {conversion_rate:.1f}% numeric ({numeric_count}/{len(non_null_values)})")
-                        elif conversion_rate > 50:
-                            print(f"   ⚠️ {col}: {conversion_rate:.1f}% numeric ({numeric_count}/{len(non_null_values)})")
-                        else:
-                            print(f"   📝 {col}: {conversion_rate:.1f}% numeric ({numeric_count}/{len(non_null_values)}) - Text column")
+            # Show company name preservation
+            text_heavy_columns = analysis_df[analysis_df['Text_Percentage'] > 50]
+            if len(text_heavy_columns) > 0:
+                print(f"\n✅ COMPANY NAMES PRESERVED in {len(text_heavy_columns)} columns:")
+                for _, row in text_heavy_columns.iterrows():
+                    sample_text = row['Sample_Text_Values']
+                    if sample_text and sample_text != '[]':
+                        print(f"   📝 {row['Column_Name']}: {sample_text}")
             
             return df
             
@@ -869,7 +987,7 @@ class ScreenerScraper:
             print(f"❌ Error saving Excel file: {str(e)}")
             return None
     
-    def _format_excel_sheets(self, writer, df, summary_df):
+    def _format_excel_sheets(self, writer, df, summary_df, analysis_df):
         """
         Apply formatting to Excel sheets
         """
@@ -878,40 +996,43 @@ class ScreenerScraper:
             from openpyxl.utils import get_column_letter
             from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1, FORMAT_PERCENTAGE_00
             
+            # Header formatting
+            header_font = Font(bold=True, color='FFFFFF')
+            header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+            
             # Format main sheet
             if 'All_Companies_Data' in writer.sheets:
                 ws = writer.sheets['All_Companies_Data']
-                
-                # Header formatting
-                header_font = Font(bold=True, color='FFFFFF')
-                header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
                 
                 for cell in ws[1]:
                     cell.font = header_font
                     cell.fill = header_fill
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                 
-                # Apply number formatting to numeric columns
+                # Apply number formatting to numeric columns only
                 for col_idx, col_name in enumerate(df.columns, 1):
                     col_letter = get_column_letter(col_idx)
                     
-                    if pd.api.types.is_numeric_dtype(df[col_name]):
-                        # Check if it's likely a percentage column
-                        if 'percent' in col_name.lower() or '%' in col_name:
-                            # Format as percentage
-                            for row in range(2, ws.max_row + 1):
-                                cell = ws[f'{col_letter}{row}']
-                                if cell.value is not None and isinstance(cell.value, (int, float)):
-                                    cell.number_format = FORMAT_PERCENTAGE_00
-                        else:
-                            # Format as number with commas for large numbers
-                            for row in range(2, ws.max_row + 1):
-                                cell = ws[f'{col_letter}{row}']
-                                if cell.value is not None and isinstance(cell.value, (int, float)):
-                                    if abs(cell.value) >= 1000:
-                                        cell.number_format = FORMAT_NUMBER_COMMA_SEPARATED1
-                                    else:
-                                        cell.number_format = '0.00'
+                    # Check if column is primarily numeric
+                    sample_vals = df[col_name].dropna().head(10)
+                    if len(sample_vals) > 0:
+                        numeric_count = sum(1 for val in sample_vals if isinstance(val, (int, float)))
+                        if numeric_count / len(sample_vals) > 0.7:  # More than 70% numeric
+                            # Check if it's likely a percentage column
+                            if 'percent' in col_name.lower() or '%' in col_name:
+                                for row in range(2, ws.max_row + 1):
+                                    cell = ws[f'{col_letter}{row}']
+                                    if cell.value is not None and isinstance(cell.value, (int, float)):
+                                        cell.number_format = FORMAT_PERCENTAGE_00
+                            else:
+                                # Format as number with commas for large numbers
+                                for row in range(2, ws.max_row + 1):
+                                    cell = ws[f'{col_letter}{row}']
+                                    if cell.value is not None and isinstance(cell.value, (int, float)):
+                                        if abs(cell.value) >= 1000:
+                                            cell.number_format = FORMAT_NUMBER_COMMA_SEPARATED1
+                                        else:
+                                            cell.number_format = '0.00'
                 
                 # Column widths
                 column_widths = {
@@ -925,47 +1046,42 @@ class ScreenerScraper:
                 for i in range(8, min(len(df.columns) + 1, 30)):
                     ws.column_dimensions[get_column_letter(i)].width = 15
             
-            # Format summary sheet
-            if 'Industry_Summary' in writer.sheets:
-                ws = writer.sheets['Industry_Summary']
-                
-                for cell in ws[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                
-                summary_widths = {'A': 12, 'B': 35, 'C': 25, 'D': 35, 'E': 20, 'F': 20, 'G': 15}
-                for col_letter, width in summary_widths.items():
-                    ws.column_dimensions[col_letter].width = width
-            
-            # Format data types sheet
-            if 'Data_Types_Info' in writer.sheets:
-                ws = writer.sheets['Data_Types_Info']
-                
-                for cell in ws[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                
-                ws.column_dimensions['A'].width = 25  # Column_Name
-                ws.column_dimensions['B'].width = 15  # Data_Type
-                ws.column_dimensions['C'].width = 15  # Non_Null_Count
-                ws.column_dimensions['D'].width = 15  # Numeric_Values
-                ws.column_dimensions['E'].width = 15  # Text_Values
-                ws.column_dimensions['F'].width = 50  # Sample_Values
+            # Format other sheets
+            for sheet_name in ['Industry_Summary', 'Data_Analysis']:
+                if sheet_name in writer.sheets:
+                    ws = writer.sheets[sheet_name]
+                    
+                    for cell in ws[1]:
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    # Auto-adjust column widths
+                    for col in ws.columns:
+                        max_length = 0
+                        column = col[0].column_letter
+                        for cell in col:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        ws.column_dimensions[column].width = adjusted_width
                     
         except Exception as e:
             print(f"⚠️ Warning: Could not apply Excel formatting: {str(e)}")
 
+
 def validate_extraction():
     """
-    Test and validate the extraction process with enhanced numeric conversion
+    Test and validate the extraction process with proper company name preservation
     """
     scraper = ScreenerScraper()
     
     while True:
         print("\n" + "="*70)
-        print("🧪 TESTING ENHANCED SCRAPER WITH AGGRESSIVE NUMERIC CONVERSION")
+        print("🧪 TESTING ENHANCED SCRAPER WITH COMPANY NAME PRESERVATION")
         print("="*70)
         
         # Login first
@@ -974,32 +1090,35 @@ def validate_extraction():
             if input().strip().lower() != 'y':
                 return False
         
-        # Test numeric conversion function first
-        print("\n🔢 TESTING NUMERIC CONVERSION:")
+        # Test company name detection function first
+        print("\n🏢 TESTING COMPANY NAME DETECTION:")
         test_values = [
-            "1,23,456",           # Indian number format
-            "12.5Cr",             # Crores
-            "5.2L",               # Lakhs
-            "15.67%",             # Percentage
-            "(25.3)",             # Negative in parentheses
-            "-45.2",              # Regular negative
-            "Rs. 1,500",          # Currency
-            "₹2,50,000",          # Indian currency
-            "N/A",                # Not applicable -> should be 0
-            "Reliance Industries Ltd", # Company name (should stay text)
-            "123.45",             # Regular decimal
-            "0.0067%",            # Small percentage
-            "456.78K",            # Thousands
-            "2.5M",               # Millions
-            "abc",                # Pure text -> should be 0 or stay text
-            "12,34,56,789",       # Large Indian number
-            "--",                 # Empty indicator -> should be 0
+            "Reliance Industries Ltd",     # Should stay as text
+            "Tata Consultancy Services",   # Should stay as text  
+            "HDFC Bank Ltd",              # Should stay as text
+            "Infosys Limited",            # Should stay as text
+            "ITC",                        # Should stay as text (ticker)
+            "RELIANCE",                   # Should stay as text (ticker)
+            "1,23,456",                   # Should convert to number
+            "12.5Cr",                     # Should convert to number
+            "15.67%",                     # Should convert to number
+            "₹2,50,000",                  # Should convert to number
+            "N/A",                        # Should convert to 0
+            "123.45",                     # Should convert to number
+            "Bajaj Auto",                 # Should stay as text
+            "State Bank of India",        # Should stay as text
+            "Asian Paints Ltd",           # Should stay as text
         ]
         
         for test_val in test_values:
+            is_company = scraper.is_likely_company_name(test_val, debug=False)
             converted = scraper.convert_to_number(test_val, debug=False)
             val_type = type(converted).__name__
-            print(f"   '{test_val}' -> {converted} ({val_type})")
+            
+            if is_company:
+                print(f"   📝 '{test_val}' -> KEPT AS TEXT -> '{converted}' ({val_type})")
+            else:
+                print(f"   🔢 '{test_val}' -> CONVERTED -> {converted} ({val_type})")
         
         print("\n" + "-"*50)
         
@@ -1028,80 +1147,96 @@ def validate_extraction():
             df_sample = pd.DataFrame(companies_data)
             print(f"   Columns found: {list(df_sample.columns)}")
             
-            # Show data types and conversion rates
-            print(f"\n🔢 DATA CONVERSION ANALYSIS:")
+            # Analyze company name preservation
+            print(f"\n🏢 COMPANY NAME PRESERVATION ANALYSIS:")
             identifier_cols = ['Industry_Name', 'Industry', 'Driving_Category', 
                              'Category', 'Sector', 'Sub_Category']
-            
-            numeric_cols = []
-            text_cols = []
-            mixed_cols = []
             
             for col in df_sample.columns:
                 if col not in identifier_cols:
                     non_null_values = df_sample[col].dropna()
                     if len(non_null_values) > 0:
-                        numeric_count = sum(1 for val in non_null_values if isinstance(val, (int, float)))
                         text_count = sum(1 for val in non_null_values if isinstance(val, str))
-                        conversion_rate = (numeric_count / len(non_null_values)) * 100
+                        numeric_count = sum(1 for val in non_null_values if isinstance(val, (int, float)))
+                        text_percentage = (text_count / len(non_null_values)) * 100
                         
-                        if conversion_rate >= 95:
-                            numeric_cols.append(f"{col} ({conversion_rate:.0f}%)")
-                        elif conversion_rate <= 20:
-                            text_cols.append(f"{col} ({conversion_rate:.0f}%)")
-                        else:
-                            mixed_cols.append(f"{col} ({conversion_rate:.0f}%)")
+                        # Show sample values
+                        sample_text = [v for v in non_null_values[:3] if isinstance(v, str)]
+                        sample_numeric = [v for v in non_null_values[:3] if isinstance(v, (int, float))]
+                        
+                        status = "📝 TEXT PRESERVED" if text_percentage > 70 else \
+                                "⚠️ MIXED" if text_percentage > 30 else "🔢 NUMERIC"
+                        
+                        print(f"   {status} | {col}: {text_percentage:.0f}% text ({text_count}T/{numeric_count}N)")
+                        if sample_text:
+                            print(f"       📝 Text samples: {sample_text}")
+                        if sample_numeric:
+                            print(f"       🔢 Numeric samples: {sample_numeric}")
             
-            print(f"   ✅ Fully numeric columns ({len(numeric_cols)}): {numeric_cols}")
-            print(f"   📝 Text columns ({len(text_cols)}): {text_cols}")
-            if mixed_cols:
-                print(f"   ⚠️ Mixed columns ({len(mixed_cols)}): {mixed_cols}")
-            
-            print(f"\n🔍 SAMPLE COMPANIES (first 3):")
+            print(f"\n🔍 SAMPLE COMPANIES (showing company names):")
             for i, row in df_sample.head(3).iterrows():
-                print(f"\n   Company {i+1}:")
-                sample_data = {}
+                # Find the company name column
+                company_name = "Unknown Company"
                 for col, val in row.items():
-                    if col not in identifier_cols:
-                        sample_data[col] = val
-                        if len(sample_data) >= 6:  # Show first 6 non-identifier columns
+                    if col not in identifier_cols and isinstance(val, str) and len(str(val)) > 5:
+                        # Check if this looks like a company name
+                        if scraper.is_likely_company_name(val):
+                            company_name = val
                             break
                 
-                for col, val in sample_data.items():
-                    val_type = type(val).__name__
-                    if isinstance(val, float):
-                        print(f"     {col}: {val:.2f} ({val_type})")
-                    else:
-                        print(f"     {col}: {val} ({val_type})")
+                print(f"\n   Company {i+1}: {company_name}")
+                print(f"     Industry: {row['Industry_Name']}")
+                
+                # Show a few other data points
+                other_data = {}
+                count = 0
+                for col, val in row.items():
+                    if col not in identifier_cols and col not in [company_name] and count < 4:
+                        other_data[col] = f"{val} ({type(val).__name__})"
+                        count += 1
+                
+                for col, val_info in other_data.items():
+                    print(f"     {col}: {val_info}")
         
-        # Validation
+        # Validation questions
         print("\n" + "="*70)
-        print("📊 NUMERIC CONVERSION SUMMARY:")
-        print(f"   • All financial data should be numeric (int/float)")
-        print(f"   • Only company names and categories should remain as text")
-        print(f"   • Empty/null values should convert to 0.0")
-        print(f"   • Percentages should remain as numbers (not converted to decimals)")
+        print("✅ VALIDATION CHECKLIST:")
+        print("   • Are company names preserved as text? (Should see 📝 TEXT PRESERVED)")
+        print("   • Are financial numbers converted properly? (Should see 🔢 NUMERIC)")
+        print("   • Do the sample companies show actual company names?")
+        print("   • Are ticker symbols (like 'RELIANCE', 'ITC') preserved as text?")
         
         while True:
-            response = input("\n✅ Is the numeric conversion working correctly? (yes/no/quit): ").strip().lower()
+            response = input("\n✅ Are company names being preserved correctly? (yes/no/quit): ").strip().lower()
             
             if response in ['yes', 'y']:
                 return True
             elif response in ['no', 'n']:
-                print("🔄 Trying again...")
+                print("🔄 Let me check what went wrong...")
+                # Show detailed debugging for first company
+                if companies_data:
+                    first_company = companies_data[0]
+                    print(f"\n🔍 DEBUGGING FIRST COMPANY:")
+                    for col, val in first_company.items():
+                        if col not in ['Industry_Name', 'Industry', 'Driving_Category', 
+                                     'Category', 'Sector', 'Sub_Category']:
+                            val_type = type(val).__name__
+                            is_company = scraper.is_likely_company_name(val) if isinstance(val, str) else False
+                            print(f"   {col}: '{val}' ({val_type}) - Company name: {is_company}")
                 break
             elif response in ['quit', 'q', 'exit']:
                 return False
             else:
                 print("Please enter 'yes', 'no', or 'quit'")
 
+
 def main():
     """
-    Main function to run the enhanced scraper with aggressive numeric conversion
+    Main function to run the enhanced scraper with proper company name preservation
     """
-    print("🚀 Enhanced Screener.in Scraper - AGGRESSIVE NUMERIC CONVERSION")
+    print("🚀 Enhanced Screener.in Scraper - COMPANY NAME PRESERVATION")
     print("="*70)
-    print("🎯 Goal: Convert ALL data to numbers except company names and categories")
+    print("🎯 Goal: Preserve company names as text, convert financial data to numbers")
     print("="*70)
     
     # Validate extraction
@@ -1126,68 +1261,56 @@ def main():
     # Start full scraping
     scraper = ScreenerScraper()
     
-    print(f"\n🚀 Starting full extraction with aggressive numeric conversion...")
+    print(f"\n🚀 Starting full extraction with company name preservation...")
     df = scraper.scrape_all_industries(filename)
     
     if df is not None:
         print(f"\n🎉 SCRAPING COMPLETED SUCCESSFULLY!")
         print(f"📊 Final dataset contains {len(df)} companies")
         
-        # Validate final numeric conversion
-        print(f"\n🔍 FINAL NUMERIC CONVERSION VALIDATION:")
+        # Show final company name preservation stats
+        print(f"\n🏢 FINAL COMPANY NAME PRESERVATION STATS:")
         identifier_cols = ['Global_S_No', 'Industry_Name', 'Industry', 'Driving_Category', 
                           'Category', 'Sector', 'Sub_Category']
         
-        data_columns = [col for col in df.columns if col not in identifier_cols]
-        total_numeric = 0
-        total_text = 0
+        text_columns = []
+        numeric_columns = []
+        mixed_columns = []
         
-        for col in data_columns:
-            non_null_values = df[col].dropna()
-            if len(non_null_values) > 0:
-                numeric_count = sum(1 for val in non_null_values if isinstance(val, (int, float)))
-                text_count = sum(1 for val in non_null_values if isinstance(val, str))
-                
-                if numeric_count > text_count:
-                    total_numeric += 1
-                else:
-                    total_text += 1
-        
-        print(f"   🔢 Columns with mostly numeric data: {total_numeric}")
-        print(f"   📝 Columns with mostly text data: {total_text}")
-        print(f"   📊 Numeric conversion rate: {(total_numeric/(total_numeric+total_text)*100):.1f}%")
-        
-        # Show sample of converted data
-        print(f"\n🔍 Sample of final converted data:")
-        sample_df = df.head(2)
-        
-        for idx, row in sample_df.iterrows():
-            company_name = "Unknown"
-            for col in row.index:
-                if 'name' in col.lower() and isinstance(row[col], str) and len(str(row[col])) > 5:
-                    company_name = str(row[col])[:30]
-                    break
-            
-            print(f"\n{int(row['Global_S_No'])}. {company_name}")
-            print(f"   Industry: {row['Industry_Name']}")
-            
-            # Show numeric data samples
-            numeric_data = {}
-            for col in data_columns[:8]:  # Show first 8 data columns
-                if col in row.index and pd.notna(row[col]):
-                    val = row[col]
-                    if isinstance(val, (int, float)):
-                        numeric_data[col] = f"{val} ({type(val).__name__})"
+        for col in df.columns:
+            if col not in identifier_cols:
+                sample_vals = df[col].dropna().head(20)
+                if len(sample_vals) > 0:
+                    text_count = sum(1 for val in sample_vals if isinstance(val, str))
+                    text_pct = (text_count / len(sample_vals)) * 100
+                    
+                    if text_pct > 70:
+                        text_columns.append(col)
+                    elif text_pct > 20:
+                        mixed_columns.append(col)
                     else:
-                        numeric_data[col] = f"{val} (text)"
-            
-            for col, val_info in numeric_data.items():
-                print(f"   {col}: {val_info}")
+                        numeric_columns.append(col)
         
-        print(f"\n📋 Data saved to {filename} with aggressive numeric conversion!")
-        print(f"🎯 Mission: Convert all financial data to numbers - COMPLETED!")
+        print(f"   📝 Text-heavy columns (company names): {len(text_columns)}")
+        print(f"   🔢 Numeric columns (financial data): {len(numeric_columns)}")
+        print(f"   ⚠️ Mixed columns: {len(mixed_columns)}")
+        
+        if text_columns:
+            print(f"\n📝 Company name columns: {text_columns}")
+            
+            # Show sample company names
+            print(f"\n🏢 Sample company names found:")
+            for col in text_columns[:3]:  # Show first 3 text columns
+                sample_names = df[col].dropna().head(5).tolist()
+                company_names = [name for name in sample_names if scraper.is_likely_company_name(name)]
+                if company_names:
+                    print(f"   {col}: {company_names}")
+        
+        print(f"\n📋 Data saved to {filename} with preserved company names!")
+        print(f"🎯 Mission: Preserve company names while converting financial data - COMPLETED!")
     else:
         print(f"\n❌ Scraping failed.")
+
 
 if __name__ == "__main__":
     main()
