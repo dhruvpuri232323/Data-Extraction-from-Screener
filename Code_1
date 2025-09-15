@@ -2,694 +2,787 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import time
+import json
 
-def extract_breadcrumb_hierarchy(soup, debug=False):
-    """
-    Extracts the 5-level breadcrumb navigation hierarchy from the page.
-    Expected structure: Industries > Consumer Discretionary > Automobile and Auto Components > Automobiles > 2/3 Wheelers
-    """
-    hierarchy = {
-        'Industry': 'Industries',  # Always "Industries"
-        'Driving_Category': '',  # e.g., Consumer Discretionary
-        'Category': '',  # e.g., Automobile and Auto Components
-        'Sector': '',  # e.g., Automobiles
-        'Sub_Category': ''   # e.g., 2/3 Wheelers
-    }
-    
-    if debug:
-        print("\n🔍 DEBUG: Starting breadcrumb extraction...")
-    
-    try:
-        # Method 1: Look for breadcrumb navigation containers
-        breadcrumb_container = None
+class ScreenerScraper:
+    def __init__(self):
+        self.base_url = "https://www.screener.in"
+        self.session = requests.Session()
+        self.logged_in = False
         
-        # Try different possible breadcrumb selectors
-        selectors = [
-            'nav',
-            'div[aria-label*="breadcrumb"]',
-            '.breadcrumb',
-            'ol.breadcrumb',
-            'ul.breadcrumb',
-            'div.breadcrumb',
-            '.nav-breadcrumb',
-            '.breadcrumbs'
-        ]
-        
-        for selector in selectors:
-            containers = soup.select(selector)
-            for container in containers:
-                if 'industries' in container.get_text().lower():
-                    breadcrumb_container = container
-                    if debug:
-                        print(f"Found breadcrumb container using selector: {selector}")
-                    break
-            if breadcrumb_container:
-                break
-        
-        # Method 2: Find "Industries" link and work from there
-        if not breadcrumb_container:
-            industries_links = soup.find_all('a', string=re.compile(r'Industries', re.IGNORECASE))
-            for industries_link in industries_links:
-                # Check if this link is part of a breadcrumb (has siblings with links)
-                parent = industries_link.find_parent()
-                if parent and len(parent.find_all('a')) > 1:
-                    breadcrumb_container = parent
-                    if debug:
-                        print("Found breadcrumb container via Industries link")
-                    break
-                # Try going up one more level
-                grandparent = parent.find_parent() if parent else None
-                if grandparent and len(grandparent.find_all('a')) > 1:
-                    breadcrumb_container = grandparent
-                    if debug:
-                        print("Found breadcrumb container via Industries link (grandparent)")
-                    break
-        
-        if breadcrumb_container:
-            # Extract all links from breadcrumb
-            breadcrumb_links = breadcrumb_container.find_all('a')
-            categories = []
-            
-            for link in breadcrumb_links:
-                text = link.get_text(strip=True)
-                if text and text.lower() not in ['home', 'login', 'screens', 'dashboard']:
-                    categories.append(text)
-            
-            if debug:
-                print(f"Found breadcrumb links: {categories}")
-            
-            # Find "Industries" and extract hierarchy after it
-            industries_index = -1
-            for i, cat in enumerate(categories):
-                if cat.lower() == 'industries':
-                    industries_index = i
-                    break
-            
-            if industries_index >= 0:
-                # Extract categories after "Industries"
-                remaining_categories = categories[industries_index + 1:]
-                if debug:
-                    print(f"Categories after 'Industries': {remaining_categories}")
-                
-                # Map to hierarchy levels
-                if len(remaining_categories) >= 1:
-                    hierarchy['Driving_Category'] = remaining_categories[0]
-                if len(remaining_categories) >= 2:
-                    hierarchy['Category'] = remaining_categories[1]
-                if len(remaining_categories) >= 3:
-                    hierarchy['Sector'] = remaining_categories[2]
-                if len(remaining_categories) >= 4:
-                    hierarchy['Sub_Category'] = remaining_categories[3]
-        
-        # Method 3: Look for breadcrumb separators in page text
-        if not any(hierarchy.values()[1:]):  # If we didn't extract anything
-            if debug:
-                print("Trying text pattern matching...")
-            
-            # Look for text patterns that might indicate breadcrumbs
-            page_text = soup.get_text()
-            
-            # Try different separator patterns
-            breadcrumb_patterns = [
-                r'Industries\s*[>›/]\s*([^>›/\n]+)\s*[>›/]\s*([^>›/\n]+)\s*[>›/]\s*([^>›/\n]+)\s*[>›/]\s*([^>›/\n]+)',
-                r'Industries\s*»\s*([^»\n]+)\s*»\s*([^»\n]+)\s*»\s*([^»\n]+)\s*»\s*([^»\n]+)',
-                r'Industries\s*→\s*([^→\n]+)\s*→\s*([^→\n]+)\s*→\s*([^→\n]+)\s*→\s*([^→\n]+)',
-            ]
-            
-            for pattern in breadcrumb_patterns:
-                match = re.search(pattern, page_text)
-                if match:
-                    hierarchy['Driving_Category'] = match.group(1).strip()
-                    hierarchy['Category'] = match.group(2).strip()
-                    hierarchy['Sector'] = match.group(3).strip()
-                    hierarchy['Sub_Category'] = match.group(4).strip()
-                    if debug:
-                        print(f"Found hierarchy via pattern matching: {hierarchy}")
-                    break
-        
-        # Method 4: Look for span elements or other text containers
-        if not any(hierarchy.values()[1:]):
-            if debug:
-                print("Trying span/div text extraction...")
-            
-            # Look for elements containing "Industries" and nearby text
-            industries_elements = soup.find_all(text=re.compile(r'Industries', re.IGNORECASE))
-            for element in industries_elements:
-                parent = element.parent
-                if parent:
-                    # Get all text from this element and siblings
-                    text_content = parent.get_text(separator=' > ', strip=True)
-                    if 'industries' in text_content.lower() and '>' in text_content:
-                        parts = [part.strip() for part in text_content.split('>')]
-                        if debug:
-                            print(f"Found text with separators: {parts}")
-                        
-                        # Find Industries and extract what follows
-                        for i, part in enumerate(parts):
-                            if part.lower() == 'industries' and i < len(parts) - 1:
-                                remaining = parts[i+1:]
-                                if len(remaining) >= 1:
-                                    hierarchy['Driving_Category'] = remaining[0]
-                                if len(remaining) >= 2:
-                                    hierarchy['Category'] = remaining[1]
-                                if len(remaining) >= 3:
-                                    hierarchy['Sector'] = remaining[2]
-                                if len(remaining) >= 4:
-                                    hierarchy['Sub_Category'] = remaining[3]
-                                break
-                        
-                        if any(hierarchy.values()[1:]):
-                            break
-        
-        if debug:
-            print(f"Final extracted hierarchy: {hierarchy}")
-        
-    except Exception as e:
-        if debug:
-            print(f"Error extracting hierarchy: {str(e)}")
-        else:
-            print(f"Error extracting hierarchy: {str(e)}")
-    
-    return hierarchy
-
-def extract_company_data(soup, industry_name, hierarchy, debug=False):
-    """
-    Extract company data table from the industry page
-    """
-    companies_data = []
-    
-    if debug:
-        print("\n🔍 DEBUG: Starting company data extraction...")
-    
-    try:
-        # Look for the main data table
-        table = soup.find('table')
-        if not table:
-            # Try other selectors
-            table = soup.select_one('table.data-table') or soup.select_one('table.responsive-holder') or soup.select_one('.table')
-        
-        if not table:
-            if debug:
-                print("No table found, trying div-based structure...")
-            # Sometimes the data might be in div structures instead of table
-            # Look for repeating row patterns
-            return companies_data
-        
-        if debug:
-            print("Found table structure")
-        
-        # Extract headers
-        headers = []
-        thead = table.find('thead')
-        if thead:
-            header_row = thead.find('tr')
-            if header_row:
-                for th in header_row.find_all(['th', 'td']):
-                    header_text = th.get_text(strip=True)
-                    if header_text:
-                        headers.append(header_text)
-        
-        if not headers:
-            # Try to find headers in first row of tbody
-            tbody = table.find('tbody')
-            if tbody:
-                first_row = tbody.find('tr')
-                if first_row:
-                    for td in first_row.find_all(['th', 'td']):
-                        header_text = td.get_text(strip=True)
-                        if header_text and not header_text.replace('.', '').replace(',', '').isdigit():
-                            headers.append(header_text)
-        
-        if debug:
-            print(f"Found headers: {headers}")
-        
-        if not headers:
-            if debug:
-                print("No headers found")
-            return companies_data
-        
-        # Extract data rows
-        tbody = table.find('tbody') or table
-        rows = tbody.find_all('tr')
-        
-        for i, row in enumerate(rows):
-            cells = row.find_all(['td', 'th'])
-            if len(cells) == 0:
-                continue
-            
-            # Improved header row skipping logic
-            cell_texts = [cell.get_text(strip=True) for cell in cells]
-            # Only skip if all cells match headers AND there are no numeric values (likely a header)
-            if cell_texts and all(text in headers for text in cell_texts if text) and not any(re.search(r'\d', text) for text in cell_texts):
-                continue
-            
-            row_data = {
-                'Industry_Name': industry_name,
-                'Industry': hierarchy['Industry'],
-                'Driving_Category': hierarchy['Driving_Category'],
-                'Category': hierarchy['Category'],
-                'Sector': hierarchy['Sector'],
-                'Sub_Category': hierarchy['Sub_Category']
-            }
-            
-            # Map cell data to headers
-            for j, cell in enumerate(cells):
-                if j < len(headers):
-                    header = headers[j]
-                    cell_text = cell.get_text(strip=True)
-                    
-                    # Clean up common header names
-                    clean_header = header.replace('.', '').replace('Rs.', 'Rs').replace('Rs.Cr.', 'Rs_Cr').replace('%', 'Percent').replace(' ', '_')
-                    row_data[clean_header] = cell_text
-            
-            if debug and i == 0:
-                print(f"Sample row data: {row_data}")
-            
-            companies_data.append(row_data)
-        
-        if debug:
-            print(f"Extracted {len(companies_data)} companies")
-            
-    except Exception as e:
-        if debug:
-            print(f"Error extracting company data: {str(e)}")
-        else:
-            print(f"Error extracting company data: {str(e)}")
-    
-    return companies_data
-
-def test_single_industry_with_companies(base_url, headers):
-    """
-    Test extraction on a single industry including company data
-    """
-    market_url = "https://www.screener.in/market/"
-    
-    try:
-        print("🔍 Fetching the market page to find the first industry...")
-        response = requests.get(market_url, headers=headers, timeout=30)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Find the first valid industry link
-        industry_links = soup.find_all('a', href=re.compile(r'/market/'))
-        
-        first_industry = None
-        for link in industry_links:
-            href = link.get('href')
-            industry_name = link.get_text(strip=True)
-            
-            # Skip sorting/header links
-            if '?' in href:
-                continue
-                
-            # Skip short names or invalid links
-            if not industry_name or len(industry_name) < 2:
-                continue
-                
-            # Skip just "market" link
-            if industry_name.lower() == 'market':
-                continue
-                
-            path_segments = href.strip('/').split('/')
-            if len(path_segments) >= 2:
-                first_industry = {
-                    'name': industry_name,
-                    'url': urljoin(base_url, href),
-                    'href': href
-                }
-                break
-        
-        if not first_industry:
-            print("❌ Could not find any valid industry link to test")
-            return None
-        
-        print(f"\n🎯 Testing with first industry: {first_industry['name']}")
-        print(f"   URL: {first_industry['url']}")
-        
-        # Fetch the industry page
-        print("   Fetching industry page...")
-        industry_response = requests.get(first_industry['url'], headers=headers, timeout=30)
-        industry_response.raise_for_status()
-        
-        industry_soup = BeautifulSoup(industry_response.content, 'html.parser')
-        
-        # Extract hierarchy with debug mode
-        hierarchy = extract_breadcrumb_hierarchy(industry_soup, debug=True)
-        
-        # Extract company data with debug mode
-        companies_data = extract_company_data(industry_soup, first_industry['name'], hierarchy, debug=True)
-        
-        return {
-            'industry': first_industry,
-            'hierarchy': hierarchy,
-            'companies_data': companies_data
+        # Enhanced headers to mimic a real browser
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
         }
         
-    except Exception as e:
-        print(f"❌ Error testing single industry: {str(e)}")
-        return None
-
-def scrape_all_industries_and_companies(excel_filename):
-    """
-    Scrape all industries and their company data
-    """
-    base_url = "https://www.screener.in"
-    market_url = "https://www.screener.in/market/"
+        self.session.headers.update(self.headers)
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-    }
+    def login(self, email="Dhruvpuri1346@gmail.com", password="Naveen41118"):
+        """
+        Login to Screener.in with the provided credentials
+        """
+        print("\n🔐 Starting login process...")
+        
+        try:
+            # First, get the login page to extract any required tokens/forms
+            login_url = f"{self.base_url}/login/"
+            print(f"   Fetching login page: {login_url}")
+            
+            response = self.session.get(login_url, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Look for login form
+            login_form = soup.find('form')
+            if not login_form:
+                print("   ❌ Could not find login form")
+                return False
+            
+            # Extract CSRF token if present
+            csrf_token = None
+            csrf_input = soup.find('input', {'name': 'csrfmiddlewaretoken'})
+            if csrf_input:
+                csrf_token = csrf_input.get('value')
+                print(f"   Found CSRF token: {csrf_token[:20]}...")
+            
+            # Prepare login data
+            login_data = {
+                'username': email,
+                'password': password,
+            }
+            
+            if csrf_token:
+                login_data['csrfmiddlewaretoken'] = csrf_token
+            
+            # Extract form action URL
+            form_action = login_form.get('action', '/login/')
+            if not form_action.startswith('http'):
+                form_action = urljoin(self.base_url, form_action)
+            
+            print(f"   Submitting login to: {form_action}")
+            
+            # Add referer header for login
+            login_headers = self.headers.copy()
+            login_headers['Referer'] = login_url
+            login_headers['Origin'] = self.base_url
+            
+            # Submit login
+            login_response = self.session.post(
+                form_action,
+                data=login_data,
+                headers=login_headers,
+                timeout=30,
+                allow_redirects=True
+            )
+            
+            print(f"   Login response status: {login_response.status_code}")
+            print(f"   Final URL after login: {login_response.url}")
+            
+            # Check if login was successful
+            # Method 1: Check if we're redirected to dashboard or market page
+            if 'login' not in login_response.url.lower():
+                print("   ✅ Login successful (redirected away from login page)")
+                self.logged_in = True
+                return True
+            
+            # Method 2: Check the response content for success indicators
+            login_soup = BeautifulSoup(login_response.content, 'html.parser')
+            
+            # Look for error messages
+            error_messages = login_soup.find_all(['div', 'span', 'p'], class_=re.compile(r'error|alert|warning', re.I))
+            if error_messages:
+                error_text = ' '.join([msg.get_text(strip=True) for msg in error_messages])
+                print(f"   ⚠️ Possible error messages: {error_text}")
+            
+            # Look for success indicators (user menu, logout link, etc.)
+            success_indicators = [
+                login_soup.find('a', href='/logout/'),
+                login_soup.find('a', text=re.compile(r'logout|sign out', re.I)),
+                login_soup.find_all('a', href=re.compile(r'/screens/|/market/')),
+            ]
+            
+            if any(success_indicators):
+                print("   ✅ Login successful (found user session indicators)")
+                self.logged_in = True
+                return True
+            
+            # Method 3: Try to access a protected page
+            test_url = f"{self.base_url}/market/"
+            test_response = self.session.get(test_url, timeout=30)
+            
+            if test_response.status_code == 200:
+                test_soup = BeautifulSoup(test_response.content, 'html.parser')
+                
+                # Look for "Edit Columns" button or similar authenticated features
+                edit_columns = test_soup.find('button', text=re.compile(r'edit.*column', re.I))
+                if edit_columns:
+                    print("   ✅ Login successful (can access authenticated features)")
+                    self.logged_in = True
+                    return True
+            
+            print("   ❌ Login may have failed - proceeding anyway")
+            return False
+            
+        except Exception as e:
+            print(f"   ❌ Login error: {str(e)}")
+            return False
     
-    try:
+    def extract_breadcrumb_hierarchy(self, soup, debug=False):
+        """
+        Enhanced breadcrumb extraction with login-aware features
+        """
+        hierarchy = {
+            'Industry': 'Industries',
+            'Driving_Category': '',
+            'Category': '',
+            'Sector': '',
+            'Sub_Category': ''
+        }
+        
+        if debug:
+            print("\n🔍 DEBUG: Starting breadcrumb extraction...")
+        
+        try:
+            # Method 1: Look for breadcrumb navigation containers with various selectors
+            breadcrumb_selectors = [
+                'nav[aria-label*="breadcrumb"]',
+                '.breadcrumb',
+                'ol.breadcrumb',
+                'ul.breadcrumb',
+                'div.breadcrumb',
+                '.nav-breadcrumb',
+                '.breadcrumbs',
+                'nav',
+                '.navigation-path',
+                '.path-navigation'
+            ]
+            
+            breadcrumb_container = None
+            
+            for selector in breadcrumb_selectors:
+                containers = soup.select(selector)
+                for container in containers:
+                    container_text = container.get_text().lower()
+                    if 'industries' in container_text:
+                        breadcrumb_container = container
+                        if debug:
+                            print(f"Found breadcrumb container using selector: {selector}")
+                        break
+                if breadcrumb_container:
+                    break
+            
+            # Method 2: Look for page title or heading that might contain hierarchy
+            if not breadcrumb_container:
+                title_elements = soup.find_all(['h1', 'h2', 'h3', '.page-title', '.section-title'])
+                for title in title_elements:
+                    title_text = title.get_text(strip=True)
+                    if len(title_text) > 5 and any(word in title_text.lower() for word in ['companies', 'industry', 'sector']):
+                        # This might be our industry name
+                        hierarchy['Sub_Category'] = title_text
+                        if debug:
+                            print(f"Found potential sub-category from title: {title_text}")
+            
+            # Method 3: Enhanced link-based extraction
+            if breadcrumb_container:
+                links = breadcrumb_container.find_all('a')
+                text_items = []
+                
+                for link in links:
+                    text = link.get_text(strip=True)
+                    if text and text.lower() not in ['home', 'login', 'screens', 'dashboard', '']:
+                        text_items.append(text)
+                
+                # Also look for non-link text in breadcrumbs
+                all_text = breadcrumb_container.get_text(separator=' > ', strip=True)
+                if '>' in all_text:
+                    text_parts = [part.strip() for part in all_text.split('>')]
+                    text_parts = [part for part in text_parts if part and part.lower() not in ['home', 'login', 'screens', 'dashboard']]
+                    if len(text_parts) > len(text_items):
+                        text_items = text_parts
+                
+                if debug:
+                    print(f"Extracted breadcrumb items: {text_items}")
+                
+                # Find Industries and map hierarchy
+                industries_index = -1
+                for i, item in enumerate(text_items):
+                    if item.lower() == 'industries':
+                        industries_index = i
+                        break
+                
+                if industries_index >= 0:
+                    remaining = text_items[industries_index + 1:]
+                    if len(remaining) >= 1:
+                        hierarchy['Driving_Category'] = remaining[0]
+                    if len(remaining) >= 2:
+                        hierarchy['Category'] = remaining[1]
+                    if len(remaining) >= 3:
+                        hierarchy['Sector'] = remaining[2]
+                    if len(remaining) >= 4:
+                        hierarchy['Sub_Category'] = remaining[3]
+            
+            # Method 4: URL-based extraction as fallback
+            if not any(hierarchy.values()[1:]):
+                current_url = soup.find('meta', property='og:url')
+                if current_url:
+                    url = current_url.get('content', '')
+                elif hasattr(soup, 'url'):
+                    url = soup.url
+                else:
+                    url = ''
+                
+                if '/market/' in url:
+                    # Extract from URL path
+                    path_parts = url.split('/market/')[-1].split('/')
+                    path_parts = [part for part in path_parts if part and part != '']
+                    
+                    # Map URL segments to hierarchy (this is speculative)
+                    if len(path_parts) >= 1:
+                        hierarchy['Sub_Category'] = path_parts[-1].replace('-', ' ').title()
+            
+            if debug:
+                print(f"Final extracted hierarchy: {hierarchy}")
+            
+        except Exception as e:
+            if debug:
+                print(f"Error extracting hierarchy: {str(e)}")
+        
+        return hierarchy
+    
+    def extract_company_data(self, soup, industry_name, hierarchy, debug=False):
+        """
+        Enhanced company data extraction with login-aware features
+        """
+        companies_data = []
+        
+        if debug:
+            print("\n🔍 DEBUG: Starting company data extraction...")
+        
+        try:
+            # Look for data tables with various selectors
+            table_selectors = [
+                'table',
+                '.data-table',
+                '.table',
+                '.companies-table',
+                '.responsive-holder table',
+                '[role="table"]'
+            ]
+            
+            table = None
+            for selector in table_selectors:
+                tables = soup.select(selector)
+                for t in tables:
+                    # Check if this table contains company data
+                    table_text = t.get_text().lower()
+                    if any(indicator in table_text for indicator in ['company', 'cmp', 'market cap', 'sales', 'profit']):
+                        table = t
+                        if debug:
+                            print(f"Found data table using selector: {selector}")
+                        break
+                if table:
+                    break
+            
+            if not table:
+                if debug:
+                    print("No suitable data table found")
+                return companies_data
+            
+            # Extract headers
+            headers = []
+            
+            # Try multiple methods to find headers
+            header_sources = [
+                table.select('thead tr th'),
+                table.select('thead tr td'),
+                table.select('tr:first-child th'),
+                table.select('tr:first-child td'),
+            ]
+            
+            for header_source in header_sources:
+                if header_source:
+                    headers = [th.get_text(strip=True) for th in header_source]
+                    headers = [h for h in headers if h]  # Remove empty headers
+                    if headers:
+                        break
+            
+            if debug:
+                print(f"Found headers: {headers}")
+            
+            if not headers:
+                if debug:
+                    print("No headers found")
+                return companies_data
+            
+            # Extract data rows
+            tbody = table.find('tbody')
+            if not tbody:
+                tbody = table
+            
+            rows = tbody.find_all('tr')
+            
+            # Skip header row if it's included in tbody
+            start_index = 0
+            if rows and len(rows) > 0:
+                first_row_cells = [cell.get_text(strip=True) for cell in rows[0].find_all(['td', 'th'])]
+                # If first row matches headers exactly, skip it
+                if first_row_cells == headers:
+                    start_index = 1
+            
+            for i, row in enumerate(rows[start_index:], start=1):
+                cells = row.find_all(['td', 'th'])
+                if len(cells) == 0:
+                    continue
+                
+                # Create base row data with hierarchy info
+                row_data = {
+                    'Industry_Name': industry_name,
+                    'Industry': hierarchy['Industry'],
+                    'Driving_Category': hierarchy['Driving_Category'],
+                    'Category': hierarchy['Category'],
+                    'Sector': hierarchy['Sector'],
+                    'Sub_Category': hierarchy['Sub_Category']
+                }
+                
+                # Extract cell data
+                for j, cell in enumerate(cells):
+                    if j < len(headers):
+                        header = headers[j]
+                        cell_text = cell.get_text(strip=True)
+                        
+                        # Clean header names for column naming
+                        clean_header = (header.replace('.', '')
+                                             .replace('Rs.', 'Rs')
+                                             .replace('Rs.Cr.', 'Rs_Cr')
+                                             .replace('%', 'Percent')
+                                             .replace(' ', '_')
+                                             .replace('/', '_')
+                                             .replace('(', '')
+                                             .replace(')', ''))
+                        
+                        row_data[clean_header] = cell_text
+                
+                # Only add row if it has meaningful data (not just empty or header-like)
+                non_hierarchy_data = {k: v for k, v in row_data.items() 
+                                     if k not in ['Industry_Name', 'Industry', 'Driving_Category', 
+                                                 'Category', 'Sector', 'Sub_Category']}
+                
+                if any(v for v in non_hierarchy_data.values()):
+                    companies_data.append(row_data)
+                    
+                    if debug and i <= 3:
+                        print(f"Sample row {i}: {dict(list(non_hierarchy_data.items())[:3])}")
+            
+            if debug:
+                print(f"Extracted {len(companies_data)} companies")
+                
+        except Exception as e:
+            if debug:
+                print(f"Error extracting company data: {str(e)}")
+            else:
+                print(f"Error extracting company data: {str(e)}")
+        
+        return companies_data
+    
+    def get_industry_links(self):
+        """
+        Get all industry links from the market page
+        """
+        market_url = f"{self.base_url}/market/"
+        
+        try:
+            print("🔍 Fetching industry list from market page...")
+            response = self.session.get(market_url, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Find all industry links
+            industry_links = soup.find_all('a', href=re.compile(r'/market/'))
+            
+            industries = []
+            seen_names = set()
+            
+            for link in industry_links:
+                href = link.get('href')
+                industry_name = link.get_text(strip=True)
+                
+                # Skip invalid links
+                if not href or not industry_name:
+                    continue
+                
+                # Skip sorting/query parameters
+                if '?' in href:
+                    continue
+                
+                # Skip short names or duplicates
+                if len(industry_name) < 2 or industry_name in seen_names:
+                    continue
+                
+                # Skip generic links
+                if industry_name.lower() in ['market', 'industries', 'home', 'login']:
+                    continue
+                
+                # Validate URL structure
+                path_segments = href.strip('/').split('/')
+                if len(path_segments) < 2:
+                    continue
+                
+                full_url = urljoin(self.base_url, href)
+                
+                industries.append({
+                    'name': industry_name,
+                    'url': full_url,
+                    'href': href
+                })
+                
+                seen_names.add(industry_name)
+            
+            print(f"   Found {len(industries)} valid industry links")
+            return industries
+            
+        except Exception as e:
+            print(f"❌ Error fetching industry links: {str(e)}")
+            return []
+    
+    def test_single_industry(self, debug=True):
+        """
+        Test extraction on a single industry
+        """
+        industries = self.get_industry_links()
+        
+        if not industries:
+            print("❌ No industries found to test")
+            return None
+        
+        # Use first industry for testing
+        test_industry = industries[0]
+        
+        print(f"\n🧪 Testing with: {test_industry['name']}")
+        print(f"   URL: {test_industry['url']}")
+        
+        try:
+            response = self.session.get(test_industry['url'], timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Extract hierarchy
+            hierarchy = self.extract_breadcrumb_hierarchy(soup, debug=debug)
+            
+            # Extract company data
+            companies_data = self.extract_company_data(soup, test_industry['name'], hierarchy, debug=debug)
+            
+            return {
+                'industry': test_industry,
+                'hierarchy': hierarchy,
+                'companies_data': companies_data
+            }
+            
+        except Exception as e:
+            print(f"❌ Error testing industry: {str(e)}")
+            return None
+    
+    def scrape_all_industries(self, excel_filename):
+        """
+        Scrape all industries and their company data
+        """
         print("\n" + "="*70)
         print("🚀 STARTING FULL INDUSTRY & COMPANY DATA SCRAPING")
         print("="*70)
         
-        # Send GET request to the market page
-        print("Fetching industry list from screener.in/market/...")
-        response = requests.get(market_url, headers=headers, timeout=30)
-        response.raise_for_status()
+        # Ensure we're logged in
+        if not self.logged_in:
+            print("⚠️ Not logged in, attempting login first...")
+            if not self.login():
+                print("❌ Login failed, proceeding without authentication...")
         
-        # Parse the HTML content
-        soup = BeautifulSoup(response.content, 'html.parser')
+        industries = self.get_industry_links()
         
-        # Find all industry links
-        all_company_data = []
-        industry_links = soup.find_all('a', href=re.compile(r'/market/'))
-        
-        print(f"Found {len(industry_links)} potential industry links...")
-        
-        # Filter out the column header links and get only industry links
-        seen_industries = set()
-        processed_count = 0
-        total_companies = 0
-        
-        for link in industry_links:
-            href = link.get('href')
-            industry_name = link.get_text(strip=True)
-            
-            # Skip if it's a sorting/header link
-            if '?' in href:
-                continue
-                
-            # Skip if it's not an industry link
-            path_segments = href.strip('/').split('/')
-            if len(path_segments) < 2:
-                continue
-                
-            # Skip empty or very short names
-            if not industry_name or len(industry_name) < 2:
-                continue
-                
-            # Skip if it's just "market" link
-            if industry_name.lower() == 'market':
-                continue
-                
-            # Create full URL
-            full_url = urljoin(base_url, href)
-            
-            # Avoid duplicates
-            if industry_name not in seen_industries:
-                seen_industries.add(industry_name)
-                processed_count += 1
-                
-                # Visit the industry page to extract hierarchy and companies
-                try:
-                    print(f"\n[{processed_count}] Processing: {industry_name}")
-                    print(f"    URL: {full_url}")
-                    
-                    industry_response = requests.get(full_url, headers=headers, timeout=30)
-                    industry_response.raise_for_status()
-                    industry_soup = BeautifulSoup(industry_response.content, 'html.parser')
-                    
-                    # Extract hierarchy information
-                    hierarchy = extract_breadcrumb_hierarchy(industry_soup, debug=False)
-                    hierarchy_display = " > ".join([h for h in [hierarchy['Driving_Category'], hierarchy['Category'], hierarchy['Sector'], hierarchy['Sub_Category']] if h])
-                    print(f"    📂 Hierarchy: {hierarchy_display}")
-                    
-                    # Extract company data
-                    companies_data = extract_company_data(industry_soup, industry_name, hierarchy, debug=False)
-                    
-                    if companies_data:
-                        all_company_data.extend(companies_data)
-                        total_companies += len(companies_data)
-                        print(f"    ✅ Found {len(companies_data)} companies (Total so far: {total_companies})")
-                    else:
-                        print(f"    ⚠️ No companies found")
-                    
-                    # Be nice to the server
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    print(f"    ❌ Error processing {industry_name}: {str(e)}")
-                    continue
-        
-        if not all_company_data:
-            print("❌ No company data was extracted!")
+        if not industries:
+            print("❌ No industries found!")
             return None
         
-        print(f"\n🎉 DATA EXTRACTION COMPLETED!")
-        print(f"   📊 Total industries processed: {processed_count}")
-        print(f"   🏢 Total companies extracted: {len(all_company_data)}")
+        all_company_data = []
+        processed_count = 0
+        total_companies = 0
+        failed_industries = []
         
-        # Create DataFrame
-        df = pd.DataFrame(all_company_data)
+        print(f"📊 Processing {len(industries)} industries...")
         
-        # Add a global serial number
-        df['Global_S_No'] = range(1, len(df) + 1)
-        
-        # Reorder columns to put identifiers first
-        identifier_columns = ['Global_S_No', 'Industry_Name', 'Industry', 'Driving_Category', 'Category', 'Sector', 'Sub_Category']
-        other_columns = [col for col in df.columns if col not in identifier_columns]
-        final_columns = identifier_columns + other_columns
-        
-        # Only keep columns that exist in the dataframe
-        final_columns = [col for col in final_columns if col in df.columns]
-        df = df[final_columns]
-        
-        # Save to Excel file with multiple sheets
-        print(f"\n💾 Saving data to: {excel_filename}")
-        with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
-            # Main sheet with all data
-            df.to_excel(writer, sheet_name='All_Companies_Data', index=False)
+        for industry in industries:
+            processed_count += 1
             
-            # Summary sheet by industry
-            summary_df = df.groupby(['Industry_Name', 'Driving_Category', 'Category', 'Sector', 'Sub_Category']).size().reset_index(name='Company_Count')
-            summary_df['Summary_S_No'] = range(1, len(summary_df) + 1)
-            summary_df = summary_df[['Summary_S_No'] + [col for col in summary_df.columns if col != 'Summary_S_No']]
-            summary_df.to_excel(writer, sheet_name='Industry_Summary', index=False)
+            try:
+                print(f"\n[{processed_count}/{len(industries)}] Processing: {industry['name']}")
+                print(f"    URL: {industry['url']}")
+                
+                response = self.session.get(industry['url'], timeout=30)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Extract hierarchy
+                hierarchy = self.extract_breadcrumb_hierarchy(soup, debug=False)
+                hierarchy_display = " > ".join([h for h in [
+                    hierarchy['Driving_Category'], 
+                    hierarchy['Category'], 
+                    hierarchy['Sector'], 
+                    hierarchy['Sub_Category']
+                ] if h])
+                
+                print(f"    📂 Hierarchy: {hierarchy_display}")
+                
+                # Extract company data
+                companies_data = self.extract_company_data(soup, industry['name'], hierarchy, debug=False)
+                
+                if companies_data:
+                    all_company_data.extend(companies_data)
+                    total_companies += len(companies_data)
+                    print(f"    ✅ Found {len(companies_data)} companies (Total: {total_companies})")
+                else:
+                    print(f"    ⚠️ No companies found")
+                    failed_industries.append(industry['name'])
+                
+                # Be respectful to the server
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"    ❌ Error processing {industry['name']}: {str(e)}")
+                failed_industries.append(industry['name'])
+                continue
+        
+        # Create and save DataFrame
+        if all_company_data:
+            print(f"\n🎉 DATA EXTRACTION COMPLETED!")
+            print(f"   📊 Industries processed: {processed_count}")
+            print(f"   🏢 Total companies: {len(all_company_data)}")
+            print(f"   ❌ Failed industries: {len(failed_industries)}")
             
-            # Format the main sheet
-            workbook = writer.book
+            if failed_industries:
+                print(f"   Failed: {', '.join(failed_industries[:5])}" + 
+                      (f" and {len(failed_industries)-5} more..." if len(failed_industries) > 5 else ""))
             
-            # Format All_Companies_Data sheet
+            return self.save_to_excel(all_company_data, excel_filename)
+        else:
+            print("❌ No data extracted!")
+            return None
+    
+    def save_to_excel(self, companies_data, filename):
+        """
+        Save data to Excel with proper formatting
+        """
+        try:
+            df = pd.DataFrame(companies_data)
+            
+            # Add global serial number
+            df['Global_S_No'] = range(1, len(df) + 1)
+            
+            # Reorder columns
+            identifier_columns = ['Global_S_No', 'Industry_Name', 'Industry', 
+                                'Driving_Category', 'Category', 'Sector', 'Sub_Category']
+            other_columns = [col for col in df.columns if col not in identifier_columns]
+            final_columns = identifier_columns + other_columns
+            final_columns = [col for col in final_columns if col in df.columns]
+            df = df[final_columns]
+            
+            print(f"\n💾 Saving data to: {filename}")
+            
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                # Main data sheet
+                df.to_excel(writer, sheet_name='All_Companies_Data', index=False)
+                
+                # Summary sheet
+                summary_df = df.groupby(['Industry_Name', 'Driving_Category', 'Category', 
+                                       'Sector', 'Sub_Category']).size().reset_index(name='Company_Count')
+                summary_df['Summary_S_No'] = range(1, len(summary_df) + 1)
+                summary_df = summary_df[['Summary_S_No'] + [col for col in summary_df.columns if col != 'Summary_S_No']]
+                summary_df.to_excel(writer, sheet_name='Industry_Summary', index=False)
+                
+                # Format the sheets
+                self._format_excel_sheets(writer, df, summary_df)
+            
+            print(f"✅ SUCCESS! Data saved to {filename}")
+            print(f"📊 Total companies: {len(df)}")
+            print(f"📂 Industries: {len(summary_df)}")
+            
+            return df
+            
+        except Exception as e:
+            print(f"❌ Error saving Excel file: {str(e)}")
+            return None
+    
+    def _format_excel_sheets(self, writer, df, summary_df):
+        """
+        Apply formatting to Excel sheets
+        """
+        try:
+            from openpyxl.styles import Font, PatternFill
+            from openpyxl.utils import get_column_letter
+            
+            # Format main sheet
             if 'All_Companies_Data' in writer.sheets:
-                worksheet = writer.sheets['All_Companies_Data']
+                ws = writer.sheets['All_Companies_Data']
                 
-                # Adjust column widths for main sheet
-                column_widths = {
-                    'A': 12,  # Global_S_No
-                    'B': 35,  # Industry_Name
-                    'C': 12,  # Industry
-                    'D': 25,  # Driving_Category
-                    'E': 35,  # Category
-                    'F': 20,  # Sector
-                    'G': 20,  # Sub_Category
-                }
-                
-                # Set widths for first 7 columns, then auto-width for others
-                for col_letter, width in column_widths.items():
-                    worksheet.column_dimensions[col_letter].width = width
-                
-                # Auto-width for company data columns
-                from openpyxl.utils import get_column_letter
-                for i in range(8, min(len(df.columns) + 1, 20)):  # Limit to prevent too wide columns
-                    col_letter = get_column_letter(i)
-                    worksheet.column_dimensions[col_letter].width = 15
-                
-                # Add formatting
-                from openpyxl.styles import Font, PatternFill
-                
+                # Header formatting
                 header_font = Font(bold=True, color='FFFFFF')
                 header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
                 
-                for cell in worksheet[1]:
+                for cell in ws[1]:
                     cell.font = header_font
                     cell.fill = header_fill
-            
-            # Format Industry_Summary sheet
-            if 'Industry_Summary' in writer.sheets:
-                summary_worksheet = writer.sheets['Industry_Summary']
                 
-                summary_widths = {
-                    'A': 12,  # Summary_S_No
-                    'B': 35,  # Industry_Name  
-                    'C': 25,  # Driving_Category
-                    'D': 35,  # Category
-                    'E': 20,  # Sector
-                    'F': 20,  # Sub_Category
-                    'G': 15,  # Company_Count
+                # Column widths
+                column_widths = {
+                    'A': 12, 'B': 35, 'C': 12, 'D': 25, 'E': 35, 'F': 20, 'G': 20
                 }
                 
-                for col_letter, width in summary_widths.items():
-                    summary_worksheet.column_dimensions[col_letter].width = width
+                for col_letter, width in column_widths.items():
+                    ws.column_dimensions[col_letter].width = width
                 
-                # Header formatting for summary
-                for cell in summary_worksheet[1]:
+                # Auto-width for other columns
+                for i in range(8, min(len(df.columns) + 1, 20)):
+                    ws.column_dimensions[get_column_letter(i)].width = 15
+            
+            # Format summary sheet
+            if 'Industry_Summary' in writer.sheets:
+                ws = writer.sheets['Industry_Summary']
+                
+                for cell in ws[1]:
                     cell.font = header_font
                     cell.fill = header_fill
-        
-        print(f"\n✅ SUCCESS! Complete dataset saved!")
-        print(f"📊 Excel file: {excel_filename}")
-        print(f"📋 File contains:")
-        print(f"   • Sheet 1: 'All_Companies_Data' - {len(df)} companies with full details")
-        print(f"   • Sheet 2: 'Industry_Summary' - {len(summary_df)} industry categories")
-        print(f"\n🔍 Sample of final dataset:")
-        
-        # Show sample data
-        sample_df = df.head(3)
-        for idx, row in sample_df.iterrows():
-            print(f"\n{int(row['Global_S_No'])}. Company: {row.get('Name', 'N/A')}")
-            print(f"   Industry: {row['Industry_Name']}")
-            print(f"   Hierarchy: {row['Industry']} > {row['Driving_Category']} > {row['Category']} > {row['Sector']} > {row['Sub_Category']}")
-            # Show a few financial metrics if available
-            financial_cols = [col for col in row.index if any(term in col.lower() for term in ['cmp', 'price', 'market', 'cap'])][:3]
-            for col in financial_cols:
-                if pd.notna(row[col]) and row[col] != '':
-                    print(f"   {col}: {row[col]}")
-        
-        print(f"\n🎊 SCRAPING COMPLETED SUCCESSFULLY!")
-        return df
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error fetching data: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ Error processing data: {e}")
-        return None
+                
+                summary_widths = {'A': 12, 'B': 35, 'C': 25, 'D': 35, 'E': 20, 'F': 20, 'G': 15}
+                for col_letter, width in summary_widths.items():
+                    ws.column_dimensions[col_letter].width = width
+                    
+        except Exception as e:
+            print(f"⚠️ Warning: Could not apply Excel formatting: {str(e)}")
 
-def validate_extraction_with_companies():
+def validate_extraction():
     """
-    Test the extraction method including company data and get user validation
+    Test and validate the extraction process
     """
-    base_url = "https://www.screener.in"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-    }
+    scraper = ScreenerScraper()
     
     while True:
         print("\n" + "="*70)
-        print("🧪 TESTING BREADCRUMB & COMPANY DATA EXTRACTION")
+        print("🧪 TESTING ENHANCED SCRAPER WITH LOGIN")
         print("="*70)
         
-        test_result = test_single_industry_with_companies(base_url, headers)
+        # Login first
+        if not scraper.login():
+            print("❌ Login failed. Continue anyway? (y/n): ", end="")
+            if input().strip().lower() != 'y':
+                return False
+        
+        # Test extraction
+        test_result = scraper.test_single_industry(debug=True)
         
         if not test_result:
-            return False, None
+            print("❌ Test failed!")
+            return False
         
         industry = test_result['industry']
         hierarchy = test_result['hierarchy']
         companies_data = test_result['companies_data']
         
-        # Display hierarchy results
-        print(f"\n📋 HIERARCHY EXTRACTION RESULTS for '{industry['name']}':")
+        # Display results
+        print(f"\n📋 RESULTS for '{industry['name']}':")
         print("-" * 50)
-        print(f"Industry Name: {industry['name']}")
-        print(f"Industry URL:  {industry['url']}")
-        print("\n🏗️ EXTRACTED HIERARCHY:")
-        print(f"Industry:         {hierarchy['Industry']}")
-        print(f"Driving_Category: {hierarchy['Driving_Category'] if hierarchy['Driving_Category'] else '(Not found)'}")
-        print(f"Category:         {hierarchy['Category'] if hierarchy['Category'] else '(Not found)'}")
-        print(f"Sector:           {hierarchy['Sector'] if hierarchy['Sector'] else '(Not found)'}")
-        print(f"Sub_Category:     {hierarchy['Sub_Category'] if hierarchy['Sub_Category'] else '(Not found)'}")
+        print(f"🏗️ HIERARCHY:")
+        for key, value in hierarchy.items():
+            print(f"   {key}: {value if value else '(Not found)'}")
         
-        # Display company data results
-        print(f"\n📊 COMPANY DATA EXTRACTION RESULTS:")
-        print("-" * 50)
-        print(f"Total companies found: {len(companies_data)}")
+        print(f"\n📊 COMPANY DATA:")
+        print(f"   Total companies: {len(companies_data)}")
         
         if companies_data:
-            # Create DataFrame to show sample
             df_sample = pd.DataFrame(companies_data)
-            print(f"\n🔍 SAMPLE DATA (showing first 3 companies):")
-            print("\nColumns found:", list(df_sample.columns))
+            print(f"   Columns found: {list(df_sample.columns)}")
             
-            # Show first few rows in a readable format
+            print(f"\n🔍 SAMPLE COMPANIES (first 3):")
             for i, row in df_sample.head(3).iterrows():
-                print(f"\nCompany {i+1}:")
+                print(f"\n   Company {i+1}:")
                 for col, val in row.items():
-                    if col not in ['Industry_Name', 'Industry', 'Driving_Category', 'Category', 'Sector', 'Sub_Category']:
-                        print(f"  {col}: {val}")
-        else:
-            print("⚠️ No company data found!")
+                    if col not in ['Industry_Name', 'Industry', 'Driving_Category', 
+                                 'Category', 'Sector', 'Sub_Category']:
+                        print(f"     {col}: {val}")
         
-        # Ask for validation
+        # Validation
         print("\n" + "="*70)
         while True:
-            user_input = input("✅ Is this extraction correct? (yes/no/quit): ").strip().lower()
+            response = input("✅ Is this extraction correct? (yes/no/quit): ").strip().lower()
             
-            if user_input in ['yes', 'y']:
-                return True, companies_data[0] if companies_data else None
-            elif user_input in ['no', 'n']:
-                print("🔄 Let me try again with improved extraction...")
-                break  # Go back to the outer loop to try again
-            elif user_input in ['quit', 'q', 'exit']:
-                print("👋 Exiting validation process.")
-                return False, None
+            if response in ['yes', 'y']:
+                return True
+            elif response in ['no', 'n']:
+                print("🔄 Trying again...")
+                break
+            elif response in ['quit', 'q', 'exit']:
+                return False
             else:
                 print("Please enter 'yes', 'no', or 'quit'")
 
 def main():
     """
-    Main function to run the scraper with validation
+    Main function to run the enhanced scraper
     """
-    print("🚀 Screener.in Industry & Company Data Scraper")
+    print("🚀 Enhanced Screener.in Scraper with Login Authentication")
     print("="*70)
     
-    # Step 1: Validate extraction method
-    is_valid, sample_data = validate_extraction_with_companies()
-    
-    if not is_valid:
-        print("❌ Validation failed or cancelled. Exiting.")
+    # Validate extraction
+    if not validate_extraction():
+        print("❌ Validation failed. Exiting.")
         return
     
-    # Step 2: Get Excel filename and start extraction
+    # Get filename
     while True:
-        excel_filename = input("\n📁 Enter the name for your Excel file (e.g., 'screener_data.xlsx'): ").strip()
+        filename = input("\n📁 Enter Excel filename (e.g., 'screener_data.xlsx'): ").strip()
         
-        if not excel_filename:
+        if not filename:
             print("Please enter a valid filename.")
             continue
-            
-        # Add .xlsx extension if not provided
-        if not excel_filename.lower().endswith('.xlsx'):
-            excel_filename += '.xlsx'
         
-        print(f"✅ Will save data to: {excel_filename}")
+        if not filename.lower().endswith('.xlsx'):
+            filename += '.xlsx'
+        
+        print(f"✅ Will save to: {filename}")
         break
     
-    # Step 3: Start full extraction
+    # Start full scraping
+    scraper = ScreenerScraper()
+    
     print(f"\n🚀 Starting full extraction...")
-    df = scrape_all_industries_and_companies(excel_filename)
+    df = scraper.scrape_all_industries(filename)
     
     if df is not None:
-        print(f"\n🎉 EXTRACTION COMPLETED SUCCESSFULLY!")
-        print(f"📊 Data saved to: {excel_filename}")
+        print(f"\n🎉 SCRAPING COMPLETED SUCCESSFULLY!")
+        print(f"📊 Final dataset contains {len(df)} companies")
+        
+        # Show sample data
+        print(f"\n🔍 Sample of extracted data:")
+        for idx, row in df.head(3).iterrows():
+            company_name = next((row[col] for col in row.index 
+                               if 'name' in col.lower() and row[col]), 'Unknown')
+            print(f"\n{int(row['Global_S_No'])}. {company_name}")
+            print(f"   Industry: {row['Industry_Name']}")
+            print(f"   Hierarchy: {row['Driving_Category']} > {row['Category']} > {row['Sector']} > {row['Sub_Category']}")
     else:
-        print(f"\n❌ Extraction failed.")
+        print(f"\n❌ Scraping failed.")
 
 if __name__ == "__main__":
     main()
